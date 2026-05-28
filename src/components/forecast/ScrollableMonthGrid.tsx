@@ -29,6 +29,7 @@ interface ScrollableMonthGridProps {
   selectedDimension: Dimension;
   selectedType: ValueType;
   onForecastChange: (regId: string, month: string, value: number) => void;
+  forecastMode: 'month' | 'day';
 }
 
 export function ScrollableMonthGrid({
@@ -42,6 +43,7 @@ export function ScrollableMonthGrid({
   selectedDimension,
   selectedType,
   onForecastChange,
+  forecastMode,
 }: ScrollableMonthGridProps) {
   const [availableWidth, setAvailableWidth] = useState(0);
 
@@ -110,7 +112,8 @@ export function ScrollableMonthGrid({
                       selectedDimension,
                       selectedType,
                       forecastData,
-                      cplPrices
+                      cplPrices,
+                      forecastMode
                     );
                     return (
                       <td
@@ -158,7 +161,8 @@ export function ScrollableMonthGrid({
                       selectedDimension,
                       selectedType,
                       forecastData,
-                      cplPrices
+                      cplPrices,
+                      forecastMode
                     );
                     return sum + value;
                   }, 0);

@@ -37,6 +37,7 @@ export interface ForecastInputTableProps {
   selectedType: ValueType;
   onForecastChange: (regId: string, month: string, value: number) => void;
   onExport: () => void;
+  forecastMode: 'month' | 'day';
 }
 
 export function ForecastInputTable({
@@ -52,6 +53,7 @@ export function ForecastInputTable({
   selectedType,
   onForecastChange,
   onExport,
+  forecastMode,
 }: ForecastInputTableProps) {
   const {
     columnOrder,
@@ -196,6 +198,7 @@ export function ForecastInputTable({
             selectedDimension={selectedDimension}
             selectedType={selectedType}
             onForecastChange={onForecastChange}
+            forecastMode={forecastMode}
           />
         }
       />

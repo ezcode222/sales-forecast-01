@@ -45,6 +45,7 @@ import {
 } from 'recharts';
 import { cn } from './lib/utils';
 import { ForecastInputTable } from './components/forecast/ForecastInputTable';
+import { getForecastCellValue } from './components/forecast/forecastCellUtils';
 import { filterRegistrations, hasActiveColumnFilters } from './components/forecast/forecastFilterUtils';
 import { MOCK_REGISTRATIONS } from './data/mockRegistrations';
 import type {
@@ -232,23 +233,17 @@ export default function App() {
     const data = registrations.map(reg => {
       const row: any = { ...reg };
       monthsToShow.forEach(m => {
-        const lookupKey = m.length === 10 ? m.slice(0, 7) : m;
-        const item = forecastData.find(f => f.registrationId === reg.id && f.month === m && f.version === selectedVersion);
-        const cpl = cplPrices.find(c => c.month === lookupKey)?.price || 0;
-        const priceFcst = cpl + reg.spread;
-        const qtyAct = item?.qtyAct ?? 200;
-        const priceAct = item?.priceAct ?? 1500;
-        const qtyFcst = item?.qtyFcst ?? 0;
-        
-        if (selectedDimension === 'Qty') {
-          row[m] = selectedType === 'Act' ? qtyAct : selectedType === 'Fcst' ? qtyFcst : qtyAct - qtyFcst;
-        } else if (selectedDimension === 'Price') {
-          row[m] = selectedType === 'Act' ? priceAct : selectedType === 'Fcst' ? priceFcst : priceAct - priceFcst;
-        } else {
-          const amtAct = qtyAct * priceAct;
-          const amtFcst = qtyFcst * priceFcst;
-          row[m] = selectedType === 'Act' ? amtAct : selectedType === 'Fcst' ? amtFcst : amtAct - amtFcst;
-        }
+        const { value } = getForecastCellValue(
+          reg,
+          m,
+          selectedVersion,
+          selectedDimension,
+          selectedType,
+          forecastData,
+          cplPrices,
+          forecastMode
+        );
+        row[m] = value;
       });
       return row;
     });
@@ -754,6 +749,7 @@ export default function App() {
                   selectedType={selectedType}
                   onForecastChange={handleForecastChange}
                   onExport={exportToExcel}
+                  forecastMode={forecastMode}
                 />
 
                 {/* Bottom Status Bar */}
