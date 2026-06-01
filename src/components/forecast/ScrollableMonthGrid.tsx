@@ -152,7 +152,7 @@ export function ScrollableMonthGrid({
                               className="w-full h-6 text-right font-mono font-bold bg-white border border-blue-200 rounded px-1 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-100"
                             />
                           ) : (
-                            <span className="font-mono pr-1">{value.toLocaleString()}</span>
+                            <span className="font-mono pr-1">{value.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
                           )}
                         </div>
                       </td>
@@ -189,7 +189,7 @@ export function ScrollableMonthGrid({
                           'justify-end text-blue-400 font-mono text-sm tracking-tighter normal-case'
                         )}
                       >
-                        {total.toLocaleString()}
+                        {total.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
                       </div>
                     </td>
                   );
