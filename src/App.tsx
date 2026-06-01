@@ -105,6 +105,7 @@ export default function App() {
   const [versions, setVersions] = useState(['Current Forecast', 'BB FY26', 'SepF FY26']);
   const [selectedVersion, setSelectedVersion] = useState('Current Forecast');
   const [stampPeriod, setStampPeriod] = useState('No');
+  const [planningView, setPlanningView] = useState<'sale' | 'accounting' | 'production'>('sale');
   const [selectedDimension, setSelectedDimension] = useState<Dimension>('Qty');
   const [selectedType, setSelectedType] = useState<ValueType>('Fcst');
   const [forecastMode, setForecastMode] = useState<'month' | 'week' | 'day'>('month');
@@ -323,7 +324,7 @@ export default function App() {
       {/* Filter Area (Header) */}
       {activeTab === 'forecast' && (
         <header className="h-[115px] bg-white border-b border-slate-200 pt-5 pb-3 px-4 flex flex-col justify-center shrink-0 shadow-sm z-40">
-          <div className="grid grid-cols-6 gap-6 max-w-[1400px] items-center">
+          <div className="grid grid-cols-7 gap-6 max-w-[1400px] items-center">
             <div className="col-span-2">
               <FilterGroup
                 label="Date Range"
@@ -341,7 +342,7 @@ export default function App() {
                             : "text-slate-500 hover:text-slate-700"
                         )}
                       >
-                        {mode === 'month' ? 'Month' : mode === 'week' ? 'Week' : 'Day'}
+                        {mode === 'month' ? 'Month' : 'Week'}
                       </button>
                     ))}
                   </div>
@@ -596,6 +597,23 @@ export default function App() {
                       {['No', 'Week 1', 'Week 2', 'Week 3', 'Week 4', 'Week 5', 'Month 1', 'Month 2'].map(option => (
                         <option key={option} value={option}>{option}</option>
                       ))}
+                    </select>
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
+                      <ChevronRight size={14} className="rotate-90" />
+                    </div>
+                  </div>
+                </FilterGroup>
+
+                <FilterGroup label="VIEW MODE">
+                  <div className="relative">
+                    <select
+                      value={planningView}
+                      onChange={e => setPlanningView(e.target.value as 'sale' | 'accounting' | 'production')}
+                      className="w-full text-xs border border-blue-200 rounded p-1.5 bg-blue-50 text-blue-700 font-bold outline-none appearance-none pr-8 transition-all focus:ring-2 focus:ring-blue-100"
+                    >
+                      <option value="sale">Sale Input</option>
+                      <option value="accounting">Accounting</option>
+                      <option value="production">Production</option>
                     </select>
                     <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
                       <ChevronRight size={14} className="rotate-90" />
