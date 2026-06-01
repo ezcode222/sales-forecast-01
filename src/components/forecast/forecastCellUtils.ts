@@ -17,7 +17,8 @@ export function getForecastCellValue(
   selectedType: ValueType,
   forecastData: ForecastValue[],
   cplPrices: CPLPrice[],
-  forecastMode: 'month' | 'week' | 'day'
+  forecastMode: 'month' | 'week' | 'day',
+  planningView: 'sale' | 'accounting' | 'production'
 ): { value: number; isEditable: boolean } {
   const directItem = forecastData.find(
     f => f.registrationId === reg.id && f.version === selectedVersion && f.month === month
@@ -102,8 +103,12 @@ export function getForecastCellValue(
     if (selectedType === 'Act') value = actValue;
     else if (selectedType === 'Fcst') {
       value = fcstValue;
-      // Week mode is the lowest editable level: allow editing weekly FCST
-      isEditable = forecastMode === 'week' ? true : !hasAggregatedDailyData;
+      if (planningView === 'sale') {
+        // Week mode is the lowest editable level: allow editing weekly FCST
+        isEditable = forecastMode === 'week' ? true : !hasAggregatedDailyData;
+      } else {
+        isEditable = false;
+      }
     } else value = actValue - fcstValue;
   } else if (selectedDimension === 'Price') {
     if (selectedType === 'Act') value = priceAct;

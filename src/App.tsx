@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   BarChart3, 
   Table as TableIcon, 
@@ -109,6 +109,7 @@ export default function App() {
   const [selectedDimension, setSelectedDimension] = useState<Dimension>('Qty');
   const [selectedType, setSelectedType] = useState<ValueType>('Fcst');
   const [forecastMode, setForecastMode] = useState<'month' | 'week' | 'day'>('month');
+  const isCurrentForecastVersion = selectedVersion === 'Current Forecast';
   const [dateRange, setDateRange] = useState({ 
     start: format(new Date(), 'yyyy-MM'), 
     end: format(addMonths(new Date(), 3), 'yyyy-MM') 
@@ -167,6 +168,8 @@ export default function App() {
 
   const handleForecastModeChange = (mode: 'month' | 'week' | 'day') => {
     if (mode === forecastMode) return;
+    if (mode === 'week' && !isCurrentForecastVersion) return;
+
     setForecastMode(mode);
     // Only convert if switching TO/FROM month mode
     // Month uses 'yyyy-MM' format, Week/Day use 'yyyy-MM-dd' format
@@ -184,6 +187,13 @@ export default function App() {
     () => filterRegistrations(registrations, columnFilters),
     [columnFilters, registrations]
   );
+
+  useEffect(() => {
+    if (!isCurrentForecastVersion && forecastMode === 'week') {
+      setForecastMode('month');
+      setDateRange(prev => convertDateRangeToMonthRange(prev));
+    }
+  }, [isCurrentForecastVersion, forecastMode]);
 
   const monthsToShow = useMemo(() => {
     const list: string[] = [];
@@ -214,6 +224,10 @@ export default function App() {
     }
     return list;
   }, [dateRange, forecastMode]);
+
+  const availableForecastModes = isCurrentForecastVersion
+    ? (['month', 'week'] as const)
+    : (['month'] as const);
 
   const filteredCplPrices = useMemo(() => {
     const fyStart = `${selectedFy}-04`;
@@ -259,7 +273,8 @@ export default function App() {
           selectedType,
           forecastData,
           cplPrices,
-          forecastMode
+          forecastMode,
+          planningView
         );
         row[m] = value;
       });
@@ -330,7 +345,7 @@ export default function App() {
                 label="Date Range"
                 action={
                   <div className="inline-flex items-center rounded-full border border-slate-200 bg-slate-100 p-1 text-[10px] font-bold uppercase">
-                    {(['month', 'week'] as const).map(mode => (
+                    {availableForecastModes.map(mode => (
                       <button
                         key={mode}
                         type="button"
@@ -785,6 +800,7 @@ export default function App() {
                   onForecastChange={handleForecastChange}
                   onExport={exportToExcel}
                   forecastMode={forecastMode}
+                  planningView={planningView}
                 />
 
                 {/* Bottom Status Bar */}

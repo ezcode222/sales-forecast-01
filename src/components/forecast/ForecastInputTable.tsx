@@ -38,6 +38,7 @@ export interface ForecastInputTableProps {
   onForecastChange: (regId: string, month: string, value: number) => void;
   onExport: () => void;
   forecastMode: 'month' | 'week' | 'day';
+  planningView: 'sale' | 'accounting' | 'production';
 }
 
 export function ForecastInputTable({
@@ -54,6 +55,7 @@ export function ForecastInputTable({
   onForecastChange,
   onExport,
   forecastMode,
+  planningView,
 }: ForecastInputTableProps) {
   const {
     columnOrder,
@@ -199,6 +201,7 @@ export function ForecastInputTable({
             selectedType={selectedType}
             onForecastChange={onForecastChange}
             forecastMode={forecastMode}
+            planningView={planningView}
           />
         }
       />

@@ -64,7 +64,19 @@ const columnDefMap = Object.fromEntries(
 ) as Record<RegColumnKey, RegColumnDef>;
 
 export const DEFAULT_COLUMN_ORDER: RegColumnKey[] = [...REG_COLUMN_KEYS];
-export const DEFAULT_VISIBLE_COLUMN_KEYS: RegColumnKey[] = REG_COLUMN_KEYS.slice(0, 10);
+// Limit default visible columns to an approved, sensible subset
+export const DEFAULT_VISIBLE_COLUMN_KEYS: RegColumnKey[] = [
+  'ownerName',
+  'registrationTopic',
+  'materialCode',
+  'materialDescription',
+  'plantName',
+  'countryName',
+  'shipTo_name',
+  'soldTo_name',
+  'partName',
+  'productName',
+];
 
 export interface OrderedRegColumn extends RegColumnDef {
   width: number;
