@@ -1,3 +1,4 @@
+import { parseISO, endOfMonth, format } from 'date-fns';
 import type { CPLPrice, Dimension, ForecastValue, Registration, ValueType } from '../../types/forecast';
 
 const isDailyKey = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -35,18 +36,40 @@ export function getForecastCellValue(
   let hasAggregatedDailyData = false;
 
   if (forecastMode === 'month') {
-    const dailyItems = forecastData.filter(
+    // Prefer aggregating from weekly entries if present (week is lowest editable level).
+    const monthStartStr = format(parseISO(`${month}-01`), 'yyyy-MM-dd');
+    const monthEndStr = format(endOfMonth(parseISO(`${month}-01`)), 'yyyy-MM-dd');
+
+    const weeklyItems = forecastData.filter(
       f =>
         f.registrationId === reg.id &&
         f.version === selectedVersion &&
-        isDailyKey(f.month) &&
-        f.month.startsWith(`${month}-`)
+        isWeekRangeKey(f.month) &&
+        // include week if it overlaps the month
+        (() => {
+          const [ws, we] = f.month.split('|');
+          return ws <= monthEndStr && we >= monthStartStr;
+        })()
     );
 
-    if (dailyItems.length > 0) {
-      qtyAct = dailyItems.reduce((sum, item) => sum + item.qtyAct, 0);
-      qtyFcst = dailyItems.reduce((sum, item) => sum + item.qtyFcst, 0);
+    if (weeklyItems.length > 0) {
+      qtyAct = weeklyItems.reduce((sum, item) => sum + item.qtyAct, 0);
+      qtyFcst = weeklyItems.reduce((sum, item) => sum + item.qtyFcst, 0);
       hasAggregatedDailyData = true;
+    } else {
+      const dailyItems = forecastData.filter(
+        f =>
+          f.registrationId === reg.id &&
+          f.version === selectedVersion &&
+          isDailyKey(f.month) &&
+          f.month.startsWith(`${month}-`)
+      );
+
+      if (dailyItems.length > 0) {
+        qtyAct = dailyItems.reduce((sum, item) => sum + item.qtyAct, 0);
+        qtyFcst = dailyItems.reduce((sum, item) => sum + item.qtyFcst, 0);
+        hasAggregatedDailyData = true;
+      }
     }
   } else if (forecastMode === 'week' && isWeekRangeKey(month)) {
     const [rangeStart, rangeEnd] = month.split('|');
