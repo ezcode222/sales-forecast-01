@@ -9,6 +9,10 @@ export const REG_COLUMN_KEYS = [
   'countryName',
   'materialDescription',
   'materialCode',
+  'carryInETD',
+  'carryOutETD',
+  'carryInLoading',
+  'carryOutLoading',
   'shipTo_name',
   'soldTo_name',
   'end_user',
@@ -98,6 +102,10 @@ export interface Registration {
   endUserName: string;
   productName: string;
   column1: string;
+  carryInETD: number;
+  carryOutETD: number;
+  carryInLoading: number;
+  carryOutLoading: number;
   priceFormula: string;
   spread: number;
 }

@@ -94,7 +94,16 @@ export function getForecastCellValue(
   const priceFcst = cpl + reg.spread;
 
   const actValue = qtyAct ?? (directItem ? directItem.qtyAct : 200);
-  const fcstValue = qtyFcst ?? (directItem ? directItem.qtyFcst : 0);
+  const baseFcstValue = qtyFcst ?? (directItem ? directItem.qtyFcst : 0);
+  const fcstValue = (() => {
+    if (planningView === 'accounting') {
+      return baseFcstValue + reg.carryInETD - reg.carryOutETD;
+    }
+    if (planningView === 'production') {
+      return baseFcstValue + reg.carryInLoading - reg.carryOutLoading;
+    }
+    return baseFcstValue;
+  })();
 
   let value = 0;
   let isEditable = false;
