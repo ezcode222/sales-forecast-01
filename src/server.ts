@@ -41,7 +41,12 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 if (basePath) {
-  app.get(basePath, (_req, res) => res.redirect(301, getAppPath()));
+  app.use((req, res, next) => {
+    if (req.path !== basePath) return next();
+    const queryIndex = req.originalUrl.indexOf('?');
+    const query = queryIndex >= 0 ? req.originalUrl.slice(queryIndex) : '';
+    return res.redirect(308, `${getAppPath()}${query}`);
+  });
 }
 app.use(basePath || '/', express.static(distPath));
 app.get('/', (_req, res) => res.redirect(getAppPath()));
