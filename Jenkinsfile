@@ -66,6 +66,7 @@ pipeline {
               --out ./dc-report
               --suppression ./owasp-suppressions.xml
               --propertyfile dc-nvd.properties
+              --noupdate
             '''
           )
         }
