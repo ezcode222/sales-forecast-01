@@ -13,6 +13,12 @@ import {
   normalizeRegistrationFilters,
 } from './registrations';
 import { getActiveSnapshotVersion } from '../services/dataSnapshot';
+import {
+  formatForecastPeriodForApi,
+  monthKeyToEndOfMonth,
+  monthKeyToFirstOfMonth,
+  parseForecastPeriodToDate,
+} from '../../lib/forecastPeriod';
 
 const router = Router();
 const SUMMARY_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -53,7 +59,8 @@ interface ForecastSummaryResponse {
 interface NormalizedForecastUpdate {
   registrationId: string;
   versionName: string;
-  period: string;
+  period: Date;
+  periodKey: string;
   granularity: string;
   qtyFcst: number;
   priceFcst: number;
@@ -97,13 +104,16 @@ function normalizeForecastUpdates(updates: unknown[]) {
     const versionName = String(item.version ?? item.versionName ?? '').trim();
     const period = String(item.period ?? '').trim();
     if (!registrationId || !versionName || !period) continue;
+    const periodKey = period;
+    const granularity = String(item.granularity ?? 'month');
     const qtyFcst = Number(item.qtyFcst ?? 0);
     const priceFcst = Number(item.priceFcst ?? 0);
-    normalized.set(`${registrationId}|${versionName}|${period}`, {
+    normalized.set(`${registrationId}|${versionName}|${periodKey}`, {
       registrationId,
       versionName,
-      period,
-      granularity: String(item.granularity ?? 'month'),
+      period: parseForecastPeriodToDate(periodKey, granularity),
+      periodKey,
+      granularity,
       qtyFcst: Number.isFinite(qtyFcst) ? qtyFcst : 0,
       priceFcst: Number.isFinite(priceFcst) ? priceFcst : 0,
     });
@@ -136,7 +146,7 @@ function mapAuditRow(row: Prisma.ForecastChangeLogGetPayload<{ include: { batch:
     batchCreatedAt: row.batch.createdAt,
     registrationId: row.registrationId,
     versionName: row.versionName,
-    period: row.period,
+    period: formatForecastPeriodForApi(row.period, row.granularity),
     granularity: row.granularity,
     oldQtyFcst: row.oldQtyFcst === null ? null : Number(row.oldQtyFcst),
     newQtyFcst: Number(row.newQtyFcst),
@@ -417,25 +427,25 @@ async function loadForecastSummaryRows(
         FROM OPENJSON(${periodsJson})
       ),
       dated_by_month AS (
-        SELECT forecast.registrationId, LEFT(forecast.period, 7) AS period, SUM(forecast.qtyFcst) AS qtyFcst
+        SELECT forecast.registrationId, FORMAT(forecast.period, 'yyyy-MM') AS period, SUM(forecast.qtyFcst) AS qtyFcst
         FROM dbo.forecast_values forecast
         INNER JOIN requested_ids requested
           ON requested.registrationId = forecast.registrationId
         INNER JOIN requested_periods requested_period
-          ON requested_period.period = LEFT(forecast.period, 7)
+          ON requested_period.period = FORMAT(forecast.period, 'yyyy-MM')
         WHERE forecast.versionName = ${version}
-          AND LEN(forecast.period) = 10
-        GROUP BY forecast.registrationId, LEFT(forecast.period, 7)
+          AND forecast.granularity = N'week'
+        GROUP BY forecast.registrationId, FORMAT(forecast.period, 'yyyy-MM')
       ),
       monthly_rows AS (
-        SELECT forecast.registrationId, forecast.period, forecast.qtyFcst
+        SELECT forecast.registrationId, FORMAT(forecast.period, 'yyyy-MM') AS period, forecast.qtyFcst
         FROM dbo.forecast_values forecast
         INNER JOIN requested_ids requested
           ON requested.registrationId = forecast.registrationId
         INNER JOIN requested_periods requested_period
-          ON requested_period.period = forecast.period
+          ON requested_period.period = FORMAT(forecast.period, 'yyyy-MM')
         WHERE forecast.versionName = ${version}
-          AND LEN(forecast.period) = 7
+          AND forecast.granularity = N'month'
       )
       SELECT
         requested_periods.period,
@@ -476,24 +486,24 @@ async function loadForecastSummaryRows(
       FROM requested_periods
     ),
     exact_week_rows AS (
-      SELECT forecast.registrationId, forecast.period, forecast.qtyFcst
+      SELECT forecast.registrationId, CONVERT(CHAR(10), forecast.period, 23) AS period, forecast.qtyFcst
       FROM dbo.forecast_values forecast
       INNER JOIN requested_ids requested
         ON requested.registrationId = forecast.registrationId
       INNER JOIN requested_periods requested_period
-        ON requested_period.period = forecast.period
+        ON requested_period.period = CONVERT(CHAR(10), forecast.period, 23)
       WHERE forecast.versionName = ${version}
-        AND LEN(forecast.period) = 10
+        AND forecast.granularity = N'week'
     ),
     monthly_rows AS (
-      SELECT forecast.registrationId, forecast.period, forecast.qtyFcst
+      SELECT forecast.registrationId, FORMAT(forecast.period, 'yyyy-MM') AS period, forecast.qtyFcst
       FROM dbo.forecast_values forecast
       INNER JOIN requested_ids requested
         ON requested.registrationId = forecast.registrationId
       INNER JOIN requested_months requested_month
-        ON requested_month.monthPeriod = forecast.period
+        ON requested_month.monthPeriod = FORMAT(forecast.period, 'yyyy-MM')
       WHERE forecast.versionName = ${version}
-        AND LEN(forecast.period) = 7
+        AND forecast.granularity = N'month'
     )
     SELECT
       requested_periods.period,
@@ -650,6 +660,7 @@ router.get('/fact-forecast', async (req, res) => {
       newQty: unknown;
       price: unknown;
       amount: unknown;
+      stampPeriod: string;
     }>>`
       SELECT TOP (${take})
         [Fcst Rev Key] AS fcstRevKey,
@@ -660,12 +671,13 @@ router.get('/fact-forecast', async (req, res) => {
         [Fcst Period] AS fcstPeriod,
         [NewQty] AS newQty,
         [Price] AS price,
-        [Amount] AS amount
+        [Amount] AS amount,
+        [Stamp Period] AS stampPeriod
       FROM [dbo].[FactForecast]
       WHERE (${version ?? null} IS NULL OR [Forecast Version] = ${version ?? null})
         AND (${registrationId ?? null} IS NULL OR [Registration Key] = ${registrationId ?? null})
-        AND (${startPeriod ?? null} IS NULL OR [Fcst Period] >= ${startPeriod ?? null})
-        AND (${endPeriod ?? null} IS NULL OR [Fcst Period] <= ${endPeriod ?? null})
+        AND (${startPeriod ?? null} IS NULL OR [Fcst Period] >= TRY_CONVERT(DATE, CONCAT(${startPeriod ?? null}, N'-01'), 126))
+        AND (${endPeriod ?? null} IS NULL OR [Fcst Period] <= EOMONTH(TRY_CONVERT(DATE, CONCAT(${endPeriod ?? null}, N'-01'), 126)))
       ORDER BY [Version Key], [Registration Key], [Fcst Period]
     `;
     res.json(rows.map(row => ({
@@ -678,6 +690,7 @@ router.get('/fact-forecast', async (req, res) => {
       newQty: Number(row.newQty ?? 0),
       price: Number(row.price ?? 0),
       amount: Number(row.amount ?? 0),
+      stampPeriod: row.stampPeriod ?? 'No',
     })));
   } catch (err) {
     console.error('[forecast] GET fact forecast error:', err);
@@ -692,7 +705,11 @@ router.get('/audit/cell', async (req, res) => {
   }
 
   try {
-    const where = { registrationId, versionName: version, period };
+    const periodDate = parseForecastPeriodToDate(
+      period,
+      /^\d{4}-\d{2}$/.test(period) ? 'month' : 'week'
+    );
+    const where = { registrationId, versionName: version, period: periodDate };
     const [totalChanges, latestRows] = await Promise.all([
       prisma.forecastChangeLog.count({ where }),
       prisma.forecastChangeLog.findMany({
@@ -721,8 +738,8 @@ router.get('/audit', async (req, res) => {
         ...(version ? { versionName: version } : {}),
         ...(start || end ? {
           period: {
-            ...(start ? { gte: start } : {}),
-            ...(end ? { lte: end } : {}),
+            ...(start ? { gte: monthKeyToFirstOfMonth(start) } : {}),
+            ...(end ? { lte: monthKeyToEndOfMonth(end) } : {}),
           },
         } : {}),
       },
@@ -740,7 +757,7 @@ router.get('/audit', async (req, res) => {
 /**
  * GET /api/forecast?version=&startPeriod=&endPeriod=&granularity=
  * Returns ForecastValue rows for given filters.
- * period field is "YYYY-MM" (month) or "YYYY-WXX" (week).
+ * period field is "YYYY-MM" (month) or "YYYY-MM-DD" (week) in API responses.
  */
 router.get('/', async (req, res) => {
   const { version, startPeriod, endPeriod, granularity } = req.query as Record<string, string>;
@@ -757,8 +774,8 @@ router.get('/', async (req, res) => {
         ...(granularity ? { granularity }                                  : {}),
         ...(startPeriod || endPeriod ? {
           period: {
-            ...(startPeriod ? { gte: startPeriod } : {}),
-            ...(endPeriod   ? { lte: endPeriod }   : {}),
+            ...(startPeriod ? { gte: monthKeyToFirstOfMonth(startPeriod) } : {}),
+            ...(endPeriod   ? { lte: monthKeyToEndOfMonth(endPeriod) }   : {}),
           },
         } : {}),
       },
@@ -767,7 +784,7 @@ router.get('/', async (req, res) => {
 
     res.json(rows.map((r) => ({
       registrationId: r.registrationId,
-      period:         r.period,
+      period:         formatForecastPeriodForApi(r.period, r.granularity),
       granularity:    r.granularity,
       version:        r.versionName,
       qtyFcst:        Number(r.qtyFcst),
@@ -824,21 +841,25 @@ router.patch('/', async (req, res) => {
           registrationId: true,
           versionName: true,
           period: true,
+          granularity: true,
           qtyFcst: true,
           priceFcst: true,
         },
       });
       const existingMap = new Map(
-        existingRows.map(row => [`${row.registrationId}|${row.versionName}|${row.period}`, row])
+        existingRows.map(row => [
+          `${row.registrationId}|${row.versionName}|${formatForecastPeriodForApi(row.period, row.granularity)}`,
+          row,
+        ])
       );
       const changedUpdates = normalizedUpdates.filter(update =>
         hasForecastChanged(
-          existingMap.get(`${update.registrationId}|${update.versionName}|${update.period}`),
+          existingMap.get(`${update.registrationId}|${update.versionName}|${update.periodKey}`),
           update
         )
       );
       const changedKeys = new Set(
-        changedUpdates.map(update => `${update.registrationId}|${update.versionName}|${update.period}`)
+        changedUpdates.map(update => `${update.registrationId}|${update.versionName}|${update.periodKey}`)
       );
       const batch = await transaction.forecastCommitBatch.create({
         data: {
@@ -850,7 +871,7 @@ router.patch('/', async (req, res) => {
       });
 
       for (const update of normalizedUpdates) {
-        const key = `${update.registrationId}|${update.versionName}|${update.period}`;
+        const key = `${update.registrationId}|${update.versionName}|${update.periodKey}`;
         const changed = changedKeys.has(key);
         await transaction.forecastValue.upsert({
           where: {
@@ -881,7 +902,7 @@ router.patch('/', async (req, res) => {
       if (changedUpdates.length > 0) {
         await transaction.forecastChangeLog.createMany({
           data: changedUpdates.map(update => {
-            const oldValue = existingMap.get(`${update.registrationId}|${update.versionName}|${update.period}`);
+            const oldValue = existingMap.get(`${update.registrationId}|${update.versionName}|${update.periodKey}`);
             return {
               batchId: batch.id,
               registrationId: update.registrationId,

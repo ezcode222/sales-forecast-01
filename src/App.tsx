@@ -2132,7 +2132,7 @@ export default function App() {
                     className="sf-select w-64 text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors shadow-sm"
                   >
                     {[2024, 2025, 2026, 2027, 2028].map(y => (
-                      <option key={y} value={y}>FY {String(y).slice(-2)} ({y}-04 ถึง {y+1}-03)</option>
+                      <option key={y} value={y}>FY {String(y).slice(-2)} ({y}-04 to {y+1}-03)</option>
                     ))}
                   </select>
                   <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">

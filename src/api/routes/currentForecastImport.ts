@@ -4,6 +4,10 @@ import * as XLSX from 'xlsx';
 import prisma from '../../db/prisma';
 import { clearForecastSummaryCache } from './forecast';
 import { getActiveSnapshotVersion } from '../services/dataSnapshot';
+import {
+  formatForecastPeriodForApi,
+  parseForecastPeriodToDate,
+} from '../../lib/forecastPeriod';
 
 const router = Router();
 
@@ -493,7 +497,7 @@ router.post('/current-forecast/confirm', async (req, res) => {
       where: {
         versionName: CURRENT_FORECAST_VERSION,
         registrationId: { in: [...new Set(records.map(record => record.matchedRegistrationId))] },
-        period: { in: [...allowedPeriods] },
+        period: { in: [...allowedPeriods].map(period => parseForecastPeriodToDate(period, 'week')) },
       },
       select: {
         registrationId: true,
@@ -504,10 +508,10 @@ router.post('/current-forecast/confirm', async (req, res) => {
       },
     });
     const existingKeys = new Set(
-      existingRows.map(row => `${row.registrationId}|${row.period}`)
+      existingRows.map(row => `${row.registrationId}|${formatForecastPeriodForApi(row.period, row.granularity)}`)
     );
     const existingMap = new Map(
-      existingRows.map(row => [`${row.registrationId}|${row.period}`, row])
+      existingRows.map(row => [`${row.registrationId}|${formatForecastPeriodForApi(row.period, row.granularity)}`, row])
     );
     const changedRecords = records.filter(record => {
       const existing = existingMap.get(`${record.matchedRegistrationId}|${record.period}`);
@@ -545,7 +549,7 @@ router.post('/current-forecast/confirm', async (req, res) => {
           FROM OPENJSON(${mergePayload})
           WITH (
             registrationId NVARCHAR(200) '$.registrationId',
-            period NVARCHAR(15) '$.period',
+            period DATE '$.period',
             qtyFcst DECIMAL(18,4) '$.qtyFcst',
             changed INT '$.changed'
           )
@@ -580,7 +584,7 @@ router.post('/current-forecast/confirm', async (req, res) => {
               batchId: batch.id,
               registrationId: record.matchedRegistrationId,
               versionName: CURRENT_FORECAST_VERSION,
-              period: record.period,
+              period: parseForecastPeriodToDate(record.period, 'week'),
               granularity: 'week',
               oldQtyFcst: existing?.qtyFcst ?? null,
               newQtyFcst: record.qtyFcst,
@@ -839,7 +843,7 @@ router.post(
             where: {
               versionName: CURRENT_FORECAST_VERSION,
               registrationId: { in: matchedRegistrationIds },
-              period: { in: periods },
+              period: { in: periods.map(period => parseForecastPeriodToDate(period, 'week')) },
             },
             select: {
               registrationId: true,
@@ -853,7 +857,7 @@ router.post(
 
       const existingRowMap = new Map(
         existingRows.map(row => [
-          `${row.registrationId}|${row.period}`,
+          `${row.registrationId}|${formatForecastPeriodForApi(row.period, row.granularity)}`,
           row,
         ])
       );

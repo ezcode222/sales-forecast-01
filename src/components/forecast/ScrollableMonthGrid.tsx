@@ -143,11 +143,11 @@ interface AuditTooltipState {
   registrationId: string;
   version: string;
   period: string;
+  baseValue: number;
   rect: DOMRect;
   data?: ForecastCellAuditSummary;
   isLoading: boolean;
   error?: string;
-  showAll: boolean;
   allChanges?: ForecastAuditChange[];
 }
 
@@ -291,10 +291,10 @@ export function ScrollableMonthGrid({
         registrationId,
         version: selectedVersion,
         period,
+        baseValue: value,
         rect,
         data: cached,
         isLoading: !cached,
-        showAll: false,
       });
       if (cached) return;
 
@@ -329,7 +329,7 @@ export function ScrollableMonthGrid({
     const controller = new AbortController();
     auditAbortRef.current?.abort();
     auditAbortRef.current = controller;
-    setAuditTooltip(previous => previous ? { ...previous, isLoading: true, showAll: true } : previous);
+    setAuditTooltip(previous => previous ? { ...previous, isLoading: true } : previous);
     try {
       const rows = await api.forecast.audit({
         registrationId: current.registrationId,
@@ -341,7 +341,7 @@ export function ScrollableMonthGrid({
       if (!controller.signal.aborted) {
         setAuditTooltip(previous =>
           previous?.key === current.key
-            ? { ...previous, allChanges: rows, isLoading: false, showAll: true }
+            ? { ...previous, allChanges: rows, isLoading: false }
             : previous
         );
       }
@@ -624,6 +624,49 @@ export function ScrollableMonthGrid({
     scrollRef.current.scrollLeft = horizontalScrollRef.current.scrollLeft;
   };
 
+  const auditTooltipSyncedValue = useMemo(() => {
+    if (!auditTooltip) return 0;
+    const reg = registrations.find(item => item.id === auditTooltip.registrationId);
+    if (!reg) return auditTooltip.baseValue;
+    return getForecastCellValue(
+      reg,
+      auditTooltip.period,
+      selectedVersion,
+      selectedDimension,
+      selectedType,
+      forecastData,
+      cplPrices,
+      forecastMode,
+      planningView,
+      forecastIndex,
+      formulaMap.get(reg.id),
+      naphthaprices,
+      benzeneprices,
+      fixedPriceMap,
+      {
+        cpl: cplPriceByMonth,
+        naphtha: naphthaPriceByMonth,
+        benzene: benzenePriceByMonth,
+      }
+    ).value;
+  }, [
+    auditTooltip,
+    benzeneprices,
+    cplPriceByMonth,
+    cplPrices,
+    fixedPriceMap,
+    forecastData,
+    forecastIndex,
+    forecastMode,
+    formulaMap,
+    naphthaPriceByMonth,
+    planningView,
+    registrations,
+    selectedDimension,
+    selectedType,
+    selectedVersion,
+  ]);
+
   return (
     <div className="relative flex flex-1 flex-col min-h-0 min-w-0 w-full self-stretch bg-slate-50 border-l border-slate-100">
       {isForecastSummaryUpdating && forecastSummary && (
@@ -835,6 +878,10 @@ export function ScrollableMonthGrid({
       {auditTooltip && createPortal(
         <ForecastAuditTooltip
           state={auditTooltip}
+          syncedValue={auditTooltipSyncedValue}
+          selectedDimension={selectedDimension}
+          onForecastChange={onForecastChange}
+          onLiveValueChange={handleLiveDraftValueChange}
           onClose={closeAuditTooltip}
           onCancelClose={cancelAuditTooltipClose}
           onShowAll={showAllAuditHistory}
@@ -845,46 +892,221 @@ export function ScrollableMonthGrid({
   );
 }
 
+function formatAuditNumber(value: number | null) {
+  return value === null
+    ? '-'
+    : value.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+}
+
+function formatAuditTime(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString(undefined, {
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+}
+
+function ForecastAuditChangeCard({ change }: { change: ForecastAuditChange }) {
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[11px] font-black text-slate-800">
+          {formatAuditNumber(change.oldQtyFcst)} → {formatAuditNumber(change.newQtyFcst)}
+        </span>
+        <span className="rounded-full bg-white px-2 py-0.5 text-[8px] font-black uppercase tracking-wide text-slate-500 ring-1 ring-slate-100">
+          {change.source}
+        </span>
+      </div>
+      <div className="mt-1.5 flex items-center justify-between gap-2 text-[9px] font-semibold text-slate-400">
+        <span className="truncate">{change.changedBy}</span>
+        <span className="shrink-0">{formatAuditTime(change.changedAt)}</span>
+      </div>
+    </div>
+  );
+}
+
+function ForecastAuditHistoryModal({
+  state,
+  changes,
+  isLoading,
+  error,
+  onClose,
+}: {
+  state: AuditTooltipState;
+  changes: ForecastAuditChange[];
+  isLoading: boolean;
+  error?: string;
+  onClose: () => void;
+}) {
+  const totalChanges = state.data?.totalChanges ?? changes.length;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[120] flex items-center justify-center p-4"
+      onMouseDown={event => event.stopPropagation()}
+    >
+      <button
+        type="button"
+        className="absolute inset-0 bg-slate-900/25 backdrop-blur-[1px]"
+        aria-label="Close full forecast history"
+        onClick={onClose}
+      />
+      <div
+        className="relative flex max-h-[min(560px,78vh)] w-full max-w-[440px] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="forecast-audit-history-title"
+      >
+        <div className="border-b border-slate-100 bg-gradient-to-r from-slate-50 to-blue-50/40 px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div
+                id="forecast-audit-history-title"
+                className="text-[11px] font-black uppercase tracking-wider text-slate-700"
+              >
+                Full Forecast History
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-white px-2 py-0.5 font-mono text-[10px] font-bold text-slate-600 ring-1 ring-slate-200">
+                  {state.period}
+                </span>
+                <span className="text-[10px] font-semibold text-slate-400">
+                  {totalChanges} change{totalChanges === 1 ? '' : 's'}
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md p-1 text-slate-400 transition hover:bg-white hover:text-slate-700"
+              aria-label="Close full forecast history"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {isLoading && changes.length === 0 ? (
+            <div className="space-y-2">
+              <div className="h-3 w-32 animate-pulse rounded bg-slate-200" />
+              <div className="h-12 animate-pulse rounded-lg bg-slate-100" />
+              <div className="h-12 animate-pulse rounded-lg bg-slate-100" />
+              <div className="h-12 animate-pulse rounded-lg bg-slate-100" />
+            </div>
+          ) : error ? (
+            <div className="text-[11px] font-semibold text-rose-600">{error}</div>
+          ) : changes.length === 0 ? (
+            <div className="text-[11px] font-semibold text-slate-500">No saved changes for this cell yet.</div>
+          ) : (
+            <div className="space-y-2.5">
+              {changes.map(change => (
+                <div key={change.id}>
+                  <ForecastAuditChangeCard change={change} />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 function ForecastAuditTooltip({
   state,
+  syncedValue,
+  selectedDimension,
+  onForecastChange,
+  onLiveValueChange,
   onClose,
   onCancelClose,
   onShowAll,
 }: {
   state: AuditTooltipState;
+  syncedValue: number;
+  selectedDimension: Dimension;
+  onForecastChange: (regId: string, month: string, value: number) => void;
+  onLiveValueChange: (draft: LiveDraftValue) => void;
   onClose: () => void;
   onCancelClose: () => void;
-  onShowAll: () => void;
+  onShowAll: () => void | Promise<void>;
 }) {
-  const changes = state.showAll ? state.allChanges : state.data?.latestChanges;
-  const top = Math.min(window.innerHeight - 260, Math.max(12, state.rect.top + 24));
-  const left = Math.min(window.innerWidth - 360, Math.max(12, state.rect.right - 340));
-  const formatNumber = (value: number | null) =>
-    value === null
-      ? '-'
-      : value.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-  const formatTime = (value: string) => {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime())
-      ? value
-      : date.toLocaleString(undefined, {
-          month: 'short',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-        });
+  const [draftValue, setDraftValue] = useState(formatEditableInputValue(syncedValue));
+  const [isFocused, setIsFocused] = useState(false);
+  const [isFullHistoryOpen, setIsFullHistoryOpen] = useState(false);
+  const commitTimerRef = useRef<number | null>(null);
+  const lastCommittedRef = useRef(syncedValue);
+
+  const totalChanges = state.data?.totalChanges ?? 0;
+  const previewChanges = state.data?.latestChanges ?? [];
+  const fullHistoryChanges = state.allChanges ?? previewChanges;
+
+  const handleOpenFullHistory = async () => {
+    onCancelClose();
+    setIsFullHistoryOpen(true);
+    if (!state.allChanges) {
+      await onShowAll();
+    }
   };
 
+  const handleCloseFullHistory = () => {
+    setIsFullHistoryOpen(false);
+  };
+
+  const clearScheduledCommit = () => {
+    if (commitTimerRef.current !== null) {
+      window.clearTimeout(commitTimerRef.current);
+      commitTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    if (!isFocused) {
+      lastCommittedRef.current = syncedValue;
+      setDraftValue(formatEditableInputValue(syncedValue));
+    }
+  }, [isFocused, syncedValue, state.key]);
+
+  useEffect(() => () => clearScheduledCommit(), []);
+
+  const commitValue = (nextValue: string) => {
+    const parsed = parseEditableInputValue(nextValue);
+    if (parsed === null || parsed === lastCommittedRef.current) return;
+    lastCommittedRef.current = parsed;
+    if (selectedDimension === 'Price') return;
+    onForecastChange(state.registrationId, state.period, parsed);
+  };
+
+  const scheduleCommit = (nextValue: string) => {
+    clearScheduledCommit();
+    commitTimerRef.current = window.setTimeout(() => {
+      commitTimerRef.current = null;
+      commitValue(nextValue);
+    }, INPUT_COMMIT_DELAY_MS);
+  };
+
+  const top = Math.min(window.innerHeight - 260, Math.max(12, state.rect.top + 24));
+  const left = Math.min(window.innerWidth - 360, Math.max(12, state.rect.right - 340));
+
   return (
+    <>
       <div
       className="fixed z-[90] w-[340px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl"
       style={{ top, left }}
       onMouseEnter={onCancelClose}
-      onMouseLeave={onClose}
+      onMouseLeave={() => {
+        if (!isFullHistoryOpen) onClose();
+      }}
       onMouseDown={event => event.stopPropagation()}
     >
-      <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-3 py-2">
-        <div className="min-w-0">
+      <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-3 py-2">
+        <div className="min-w-0 shrink-0">
           <div className="text-[10px] font-black uppercase tracking-wider text-slate-700">
             Forecast History
           </div>
@@ -892,63 +1114,110 @@ function ForecastAuditTooltip({
             {state.period}
           </div>
         </div>
+        <div className="flex min-w-0 flex-1 items-center justify-end px-1">
+          <input
+            type="number"
+            value={draftValue}
+            onFocus={() => {
+              onCancelClose();
+              setIsFocused(true);
+            }}
+            onBlur={() => {
+              clearScheduledCommit();
+              setIsFocused(false);
+              commitValue(draftValue);
+            }}
+            onKeyDown={event => {
+              if (event.key === 'Enter') {
+                clearScheduledCommit();
+                commitValue(draftValue);
+                event.currentTarget.blur();
+              }
+            }}
+            onChange={event => {
+              const nextValue = event.target.value;
+              setDraftValue(nextValue);
+              const parsed = parseEditableInputValue(nextValue);
+              if (parsed !== null) {
+                onLiveValueChange({
+                  regId: state.registrationId,
+                  month: state.period,
+                  value: parsed,
+                  baseValue: state.baseValue,
+                });
+              }
+              scheduleCommit(nextValue);
+            }}
+            className="h-7 w-full min-w-[72px] max-w-[108px] rounded border border-blue-200 bg-white px-2 text-right font-mono text-[11px] font-bold text-slate-700 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-100"
+            aria-label={`Current forecast value for ${state.period}`}
+          />
+        </div>
         <button
           type="button"
           onClick={onClose}
-          className="rounded px-1.5 py-0.5 text-xs font-bold text-slate-400 hover:bg-white hover:text-slate-700"
+          className="shrink-0 rounded px-1.5 py-0.5 text-xs font-bold text-slate-400 hover:bg-white hover:text-slate-700"
           aria-label="Close forecast history"
         >
           ×
         </button>
       </div>
 
-      <div className="max-h-[320px] overflow-auto p-3">
-        {state.isLoading && !changes ? (
+      <div className="max-h-[280px] overflow-auto p-3">
+        {state.isLoading && previewChanges.length === 0 && !state.data ? (
           <div className="space-y-2">
             <div className="h-3 w-28 animate-pulse rounded bg-slate-200" />
             <div className="h-10 animate-pulse rounded bg-slate-100" />
             <div className="h-10 animate-pulse rounded bg-slate-100" />
           </div>
-        ) : state.error ? (
+        ) : state.error && !isFullHistoryOpen ? (
           <div className="text-[11px] font-semibold text-rose-600">{state.error}</div>
-        ) : state.data?.totalChanges === 0 ? (
+        ) : totalChanges === 0 ? (
           <div className="text-[11px] font-semibold text-slate-500">No saved changes for this cell yet.</div>
         ) : (
           <>
-            <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              Total changes: <span className="text-blue-700">{state.data?.totalChanges ?? changes?.length ?? 0}</span>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                Total changes: <span className="text-blue-700">{totalChanges}</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleOpenFullHistory}
+                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-blue-200/80 bg-white px-2.5 py-1 text-[9px] font-bold text-blue-700 shadow-sm transition hover:border-blue-300 hover:bg-blue-50"
+              >
+                <span>All history</span>
+                <svg viewBox="0 0 16 16" className="h-3 w-3" aria-hidden="true">
+                  <path
+                    d="M6 3.5 10.5 8 6 12.5"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
             </div>
             <div className="space-y-2">
-              {(changes ?? []).map(change => (
-                <div key={change.id} className="rounded-md border border-slate-100 bg-slate-50 px-2.5 py-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-[11px] font-black text-slate-800">
-                      {formatNumber(change.oldQtyFcst)} → {formatNumber(change.newQtyFcst)}
-                    </span>
-                    <span className="rounded bg-white px-1.5 py-0.5 text-[8px] font-black uppercase text-slate-500">
-                      {change.source}
-                    </span>
-                  </div>
-                  <div className="mt-1 flex items-center justify-between gap-2 text-[9px] font-semibold text-slate-400">
-                    <span className="truncate">{change.changedBy}</span>
-                    <span>{formatTime(change.changedAt)}</span>
-                  </div>
+              {previewChanges.map(change => (
+                <div key={change.id}>
+                  <ForecastAuditChangeCard change={change} />
                 </div>
               ))}
             </div>
-            {!state.showAll && (state.data?.totalChanges ?? 0) > 3 && (
-              <button
-                type="button"
-                onClick={onShowAll}
-                className="mt-3 w-full rounded border border-blue-100 bg-blue-50 px-3 py-2 text-[10px] font-black uppercase tracking-wider text-blue-700 hover:bg-blue-100"
-              >
-                View all history
-              </button>
-            )}
           </>
         )}
       </div>
     </div>
+      {isFullHistoryOpen && (
+        <ForecastAuditHistoryModal
+          state={state}
+          changes={fullHistoryChanges}
+          isLoading={state.isLoading}
+          error={state.error}
+          onClose={handleCloseFullHistory}
+        />
+      )}
+    </>
   );
 }
 

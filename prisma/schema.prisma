@@ -25,12 +25,12 @@ model ForecastVersion {
 
 /// Forecast input values (app-owned, written by users)
 /// period field stores:
-///   - Month granularity: "YYYY-MM"   e.g. "2026-06"
-///   - Week  granularity: "YYYY-WXX"  e.g. "2026-W23"
+///   - Month granularity: first day of month (DATE) e.g. 2026-06-01
+///   - Week  granularity: week anchor date (DATE) e.g. 2026-06-04
 model ForecastValue {
   registrationId String          @db.NVarChar(200)
   versionName    String          @db.NVarChar(100)
-  period         String          @db.NVarChar(15)   // "YYYY-MM" or "YYYY-WXX"
+  period         DateTime        @db.Date
   granularity    String          @db.NVarChar(10)   // "month" or "week"
   qtyFcst        Decimal         @default(0) @db.Decimal(18, 4)
   priceFcst      Decimal         @default(0) @db.Decimal(18, 4)
@@ -60,7 +60,7 @@ model ForecastChangeLog {
   batchId        String              @db.NVarChar(36)
   registrationId String              @db.NVarChar(200)
   versionName    String              @db.NVarChar(100)
-  period         String              @db.NVarChar(15)
+  period         DateTime            @db.Date
   granularity    String              @db.NVarChar(10)
   oldQtyFcst     Decimal?            @db.Decimal(18, 4)
   newQtyFcst     Decimal             @db.Decimal(18, 4)
