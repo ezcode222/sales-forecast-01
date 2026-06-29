@@ -4,10 +4,13 @@ import prisma from '../../db/prisma';
 const UFA_PLANTS = new Set(['1504', '1505', '1506']);
 const POLYMER_PLANTS = new Set(['1104', '1105', '1109']);
 
-let crmBusinessUnitColumnPromise: Promise<boolean> | null = null;
+let crmBusinessUnitColumnCache: boolean | undefined;
 
 function normalizePlantCode(value: unknown) {
-  return String(value ?? '').trim();
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value).trim();
+  }
+  return '';
 }
 
 export function businessUnitFromPlantCode(value: unknown) {
@@ -18,23 +21,27 @@ export function businessUnitFromPlantCode(value: unknown) {
 }
 
 export async function hasCrmBusinessUnitColumn() {
-  if (!crmBusinessUnitColumnPromise) {
-    crmBusinessUnitColumnPromise = prisma.$queryRaw<Array<{ hasColumn: number }>>`
-      SELECT CASE WHEN EXISTS (
-        SELECT 1
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = 'dbo'
-          AND TABLE_NAME = 'VW_CRM_RegistrationAll_1'
-          AND COLUMN_NAME = 'BU'
-      ) THEN 1 ELSE 0 END AS hasColumn
-    `.then(rows => Number(rows[0]?.hasColumn ?? 0) === 1);
+  if (crmBusinessUnitColumnCache !== undefined) {
+    return crmBusinessUnitColumnCache;
   }
-  return crmBusinessUnitColumnPromise;
+
+  const rows = await prisma.$queryRaw<Array<{ hasColumn: number }>>`
+    SELECT CASE WHEN EXISTS (
+      SELECT 1
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = 'dbo'
+        AND TABLE_NAME = 'VW_CRM_RegistrationAll_1'
+        AND COLUMN_NAME = 'BU'
+    ) THEN 1 ELSE 0 END AS hasColumn
+  `;
+  crmBusinessUnitColumnCache = Number(rows[0]?.hasColumn ?? 0) === 1;
+  return crmBusinessUnitColumnCache;
 }
 
 export async function crmBusinessUnitSelectSql(alias = 'r', columnAlias = 'BusinessUnit') {
   if (await hasCrmBusinessUnitColumn()) {
-    return Prisma.sql`NULLIF(LTRIM(RTRIM(CAST(${Prisma.raw(`${alias}.BU`)} AS NVARCHAR(50)))), '') AS ${Prisma.raw(columnAlias)}`;
+    const buColumn = `${alias}.BU`;
+    return Prisma.sql`NULLIF(LTRIM(RTRIM(CAST(${Prisma.raw(buColumn)} AS NVARCHAR(50)))), '') AS ${Prisma.raw(columnAlias)}`;
   }
   return Prisma.sql`CAST(NULL AS NVARCHAR(50)) AS ${Prisma.raw(columnAlias)}`;
 }

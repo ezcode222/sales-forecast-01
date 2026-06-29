@@ -278,6 +278,13 @@ export function normalizeRegistrationFilters(value: unknown): RegistrationFilter
   );
 }
 
+function scalarToString(value: unknown) {
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value).trim();
+  }
+  return '';
+}
+
 function mapRegistrationRow(row: Record<string, unknown>) {
   return {
     id: String(row.RegistrationId ?? row.id ?? ''),
@@ -285,7 +292,7 @@ function mapRegistrationRow(row: Record<string, unknown>) {
     keyForNoCRM: String(row.KeyforNoCRM ?? row.keyForNoCRM ?? ''),
     sourceStatus: 'registration_only',
     ownerName: String(row.OwnerName ?? row.ownerName ?? ''),
-    businessUnit: String(row.BusinessUnit ?? row.businessUnit ?? ''),
+    businessUnit: scalarToString(row.BusinessUnit ?? row.businessUnit),
     registrationTopic: String(row.RegistrationTopic ?? row.registrationTopic ?? ''),
     onOffSpec: String(row.OnOffSpec ?? row.onOffSpec ?? ''),
     plantCode: String(row.PlantCode ?? row.plantCode ?? ''),

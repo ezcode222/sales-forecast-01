@@ -28,7 +28,7 @@ import { format, addMonths, addDays, getDay, startOfMonth, endOfMonth, parseISO 
 import { cn } from './lib/utils';
 import { ForecastInputTable } from './components/forecast/ForecastInputTable';
 import { getForecastCellValue } from './components/forecast/forecastCellUtils';
-import { filterRegistrations } from './components/forecast/forecastFilterUtils';
+import { filterRegistrations, isColumnFilterActive } from './components/forecast/forecastFilterUtils';
 import { api, ApiError, type AuthUser, type SnapshotStatus } from './lib/api';
 import type {
   ColumnFiltersState,
@@ -107,10 +107,77 @@ function priceRowsToBenzenePrices(rows: PriceManagementRow[]): CPLPrice[] {
   return rows.map(row => ({ month: row.month, price: row.benzenePrice }));
 }
 
-function loadStoredBusinessUnitFilter(): ColumnFiltersState {
-  if (typeof window === 'undefined') return {};
+function mapLegacyCplPrices(prices: CPLPrice[]): PriceManagementRow[] {
+  return prices.map(price => ({
+    month: price.month,
+    cplPrice: price.price,
+    naphthaPrice: 0,
+    benzenePrice: 0,
+  }));
+}
+
+function resolveApiErrorMessage(primary: unknown, secondary: unknown, fallback: string): string {
+  if (secondary instanceof ApiError) return secondary.message;
+  if (primary instanceof ApiError) return primary.message;
+  return fallback;
+}
+
+async function loadPriceManagementData(
+  fy: number,
+  priceManagementType: 'Actual' | 'Fcst',
+  priceManagementVersion: string,
+  signal: AbortSignal,
+): Promise<PriceManagementRow[]> {
+  const versionForQuery = priceManagementType === 'Actual'
+    ? GLOBAL_PRICE_VERSION
+    : priceManagementVersion;
   try {
-    const raw = window.localStorage.getItem(BU_FILTER_STORAGE_KEY);
+    const result = await api.priceManagement.list(fy, priceManagementType, versionForQuery, signal);
+    return result.rows;
+  } catch (primaryError) {
+    try {
+      const legacyPrices = await api.cpl.list(fy);
+      return mapLegacyCplPrices(legacyPrices);
+    } catch (secondaryError) {
+      throw new Error(resolveApiErrorMessage(primaryError, secondaryError, 'Failed to load Price Management data'));
+    }
+  }
+}
+
+async function loadForecastPriceData(
+  startMonth: string,
+  endMonth: string,
+  version: string,
+  signal: AbortSignal,
+): Promise<{ cpl: CPLPrice[]; naphtha: CPLPrice[]; benzene: CPLPrice[] }> {
+  try {
+    const result = await api.priceManagement.listRange(startMonth, endMonth, version, signal);
+    return {
+      cpl: priceRowsToCplPrices(result.rows),
+      naphtha: priceRowsToNaphthaPrices(result.rows),
+      benzene: priceRowsToBenzenePrices(result.rows),
+    };
+  } catch (primaryError) {
+    try {
+      const legacyPrices = await api.cpl.list();
+      const cplFallback = legacyPrices
+        .filter(price => price.month >= startMonth && price.month <= endMonth)
+        .sort((a, b) => a.month.localeCompare(b.month));
+      return {
+        cpl: cplFallback,
+        naphtha: cplFallback.map(price => ({ month: price.month, price: 0 })),
+        benzene: cplFallback.map(price => ({ month: price.month, price: 0 })),
+      };
+    } catch (secondaryError) {
+      throw new Error(resolveApiErrorMessage(primaryError, secondaryError, 'Failed to load forecast prices'));
+    }
+  }
+}
+
+function loadStoredBusinessUnitFilter(): ColumnFiltersState {
+  if (typeof globalThis.localStorage === 'undefined') return {};
+  try {
+    const raw = globalThis.localStorage.getItem(BU_FILTER_STORAGE_KEY);
     if (!raw) return {};
     const selectedValues = JSON.parse(raw);
     if (!Array.isArray(selectedValues)) return {};
@@ -498,9 +565,9 @@ export default function App() {
     try {
       const selectedValues = columnFilters.businessUnit?.selectedValues ?? [];
       if (selectedValues.length > 0) {
-        window.localStorage.setItem(BU_FILTER_STORAGE_KEY, JSON.stringify(selectedValues));
+        globalThis.localStorage.setItem(BU_FILTER_STORAGE_KEY, JSON.stringify(selectedValues));
       } else {
-        window.localStorage.removeItem(BU_FILTER_STORAGE_KEY);
+        globalThis.localStorage.removeItem(BU_FILTER_STORAGE_KEY);
       }
     } catch {
       // Local storage is optional; filters still work without persistence.
@@ -508,8 +575,8 @@ export default function App() {
   }, [columnFilters.businessUnit?.selectedValues]);
   const businessUnitFilterValues = columnFilters.businessUnit?.selectedValues ?? [];
   const nonBusinessUnitFilterCount = useMemo(
-    () => (Object.entries(columnFilters) as Array<[string, ColumnFilterValue]>)
-      .filter(([key, filter]) => key !== 'businessUnit' && filter.selectedValues.length > 0)
+    () => Object.keys(columnFilters)
+      .filter(key => key !== 'businessUnit' && isColumnFilterActive(columnFilters[key]))
       .length,
     [columnFilters]
   );
@@ -683,39 +750,18 @@ export default function App() {
     const controller = new AbortController();
     async function loadPriceManagement() {
       try {
-        const versionForQuery = priceManagementType === 'Actual'
-          ? GLOBAL_PRICE_VERSION
-          : priceManagementVersion;
-        const result = await api.priceManagement.list(
+        const rows = await loadPriceManagementData(
           selectedFy,
           priceManagementType,
-          versionForQuery,
-          controller.signal
+          priceManagementVersion,
+          controller.signal,
         );
         if (cancelled) return;
-
-        setPriceManagementRows(result.rows);
+        setPriceManagementRows(rows);
         setAppError(null);
       } catch (err) {
         if (!cancelled && !controller.signal.aborted) {
-          try {
-            const legacyPrices = await api.cpl.list(selectedFy);
-            if (cancelled || controller.signal.aborted) return;
-            setPriceManagementRows(legacyPrices.map(price => ({
-              month: price.month,
-              cplPrice: price.price,
-              naphthaPrice: 0,
-              benzenePrice: 0,
-            })));
-            setAppError(null);
-          } catch (fallbackErr) {
-            const message = fallbackErr instanceof ApiError
-              ? fallbackErr.message
-              : err instanceof ApiError
-                ? err.message
-                : 'Failed to load Price Management data';
-            setAppError(message);
-          }
+          setAppError(err instanceof Error ? err.message : 'Failed to load Price Management data');
         }
       }
     }
@@ -732,38 +778,19 @@ export default function App() {
     const controller = new AbortController();
     async function loadForecastPrices() {
       try {
-        const result = await api.priceManagement.listRange(
+        const prices = await loadForecastPriceData(
           dateRange.start.slice(0, 7),
           dateRange.end.slice(0, 7),
           selectedVersion,
-          controller.signal
+          controller.signal,
         );
         if (cancelled) return;
-        setCplPrices(priceRowsToCplPrices(result.rows));
-        setNaphthaprices(priceRowsToNaphthaPrices(result.rows));
-        setBenzeneprices(priceRowsToBenzenePrices(result.rows));
+        setCplPrices(prices.cpl);
+        setNaphthaprices(prices.naphtha);
+        setBenzeneprices(prices.benzene);
       } catch (err) {
         if (!cancelled && !controller.signal.aborted) {
-          try {
-            const legacyPrices = await api.cpl.list();
-            if (cancelled || controller.signal.aborted) return;
-            const startMonth = dateRange.start.slice(0, 7);
-            const endMonth = dateRange.end.slice(0, 7);
-            const cplFallback = legacyPrices
-              .filter(price => price.month >= startMonth && price.month <= endMonth)
-              .sort((a, b) => a.month.localeCompare(b.month));
-            setCplPrices(cplFallback);
-            setNaphthaprices(cplFallback.map(price => ({ month: price.month, price: 0 })));
-            setBenzeneprices(cplFallback.map(price => ({ month: price.month, price: 0 })));
-            setAppError(null);
-          } catch (fallbackErr) {
-            const message = fallbackErr instanceof ApiError
-              ? fallbackErr.message
-              : err instanceof ApiError
-                ? err.message
-                : 'Failed to load forecast prices';
-            setAppError(message);
-          }
+          setAppError(err instanceof Error ? err.message : 'Failed to load forecast prices');
         }
       }
     }
@@ -1754,6 +1781,24 @@ export default function App() {
     }
   }, [loadDone, loadStart, priceManagementRows, priceManagementType, priceManagementVersion, selectedVersion]);
 
+  const handleRemovePriceManagementRow = useCallback(async (month: string) => {
+    if (!globalThis.confirm(`Remove price for ${month}?`)) return;
+    loadStart();
+    try {
+      await api.priceManagement.remove(
+        month,
+        priceManagementType,
+        priceManagementType === 'Actual' ? GLOBAL_PRICE_VERSION : priceManagementVersion,
+      );
+      setPriceManagementRows(previous => previous.filter(row => row.month !== month));
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to remove price';
+      setAppError(msg);
+    } finally {
+      loadDone();
+    }
+  }, [loadDone, loadStart, priceManagementType, priceManagementVersion]);
+
   const displayUserName = authUser?.name || authUser?.email || 'User';
   const userInitials = displayUserName
     .split(/\s+/)
@@ -2604,25 +2649,9 @@ export default function App() {
                             </div>
                           </td>
                           <td className="px-4 py-3 text-center">
-                            <button 
-                              onClick={async () => {
-                                if (confirm(`Remove price for ${cpl.month}?`)) {
-                                  try {
-                                    loadStart();
-                                    await api.priceManagement.remove(
-                                      cpl.month,
-                                      priceManagementType,
-                                      priceManagementType === 'Actual' ? GLOBAL_PRICE_VERSION : priceManagementVersion
-                                    );
-                                    setPriceManagementRows(prev => prev.filter(p => p.month !== cpl.month));
-                                  } catch (err) {
-                                    const msg = err instanceof ApiError ? err.message : 'Failed to remove price';
-                                    setAppError(msg);
-                                  } finally {
-                                    loadDone();
-                                  }
-                                }
-                              }}
+                            <button
+                              type="button"
+                              onClick={() => void handleRemovePriceManagementRow(cpl.month)}
                               className="text-red-400 hover:text-red-600 text-[10px] font-black uppercase tracking-widest hover:underline transition-all"
                             >
                               Remove
@@ -2947,7 +2976,7 @@ function CopyPriceVersionModal({
   onSourceChange,
   onClose,
   onCopy,
-}: {
+}: Readonly<{
   fy: number;
   versions: string[];
   sourceVersion: string;
@@ -2956,7 +2985,7 @@ function CopyPriceVersionModal({
   onSourceChange: (version: string) => void;
   onClose: () => void;
   onCopy: () => void;
-}) {
+}>) {
   const sourceOptions = versions.filter(version => version !== targetVersion);
   const selectedSource = sourceOptions.includes(sourceVersion)
     ? sourceVersion
@@ -2968,7 +2997,12 @@ function CopyPriceVersionModal({
 
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-slate-900/35 backdrop-blur-sm" onClick={onClose} />
+      <button
+        type="button"
+        className="absolute inset-0 bg-slate-900/35 backdrop-blur-sm"
+        aria-label="Close copy forecast price dialog"
+        onClick={onClose}
+      />
       <div className="relative w-full max-w-xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
         <div className="flex items-start justify-between border-b border-slate-100 bg-white px-6 py-5">
           <div>
@@ -3029,14 +3063,14 @@ function CopyPriceVersionModal({
   );
 }
 
-function DetailModal({ onClose, data, registrations }: { onClose: () => void; data: ForecastValue[]; registrations: Registration[] }) {
+function DetailModal({ onClose, data, registrations }: Readonly<{ onClose: () => void; data: ForecastValue[]; registrations: Registration[] }>) {
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <motion.div 
-        initial={{ opacity: 0 }} 
-        animate={{ opacity: 1 }} 
+      <button
+        type="button"
+        aria-label="Close sales report details"
         onClick={onClose}
-        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" 
+        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
       />
       <motion.div 
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
@@ -3111,7 +3145,7 @@ function DetailModal({ onClose, data, registrations }: { onClose: () => void; da
   );
 }
 
-function AddCplModal({ fy, onClose, onAdd, cplPrices }: { fy: number; onClose: () => void; onAdd: (months: string[], price: number) => void; cplPrices: CPLPrice[] }) {
+function AddCplModal({ fy, onClose, onAdd, cplPrices }: Readonly<{ fy: number; onClose: () => void; onAdd: (months: string[], price: number) => void; cplPrices: CPLPrice[] }>) {
   const [selectedMonths, setSelectedMonths] = useState<string[]>(['04']);
   const [price, setPrice] = useState<number>(3500);
 

@@ -26,16 +26,13 @@ function fyBounds(fy: unknown) {
 
 function monthRange(start: string, end: string) {
   const months: string[] = [];
-  let year = Number(start.slice(0, 4));
-  let month = Number(start.slice(5, 7));
-  const endKey = end;
-  while (`${year}-${String(month).padStart(2, '0')}` <= endKey) {
-    months.push(`${year}-${String(month).padStart(2, '0')}`);
-    month += 1;
-    if (month > 12) {
-      month = 1;
-      year += 1;
-    }
+  let cursor = start;
+  while (cursor <= end) {
+    months.push(cursor);
+    const [year, month] = cursor.split('-').map(Number);
+    cursor = month === 12
+      ? `${year + 1}-01`
+      : `${year}-${String(month + 1).padStart(2, '0')}`;
   }
   return months;
 }
