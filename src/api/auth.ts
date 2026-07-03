@@ -2,10 +2,12 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type { NextFunction, Request, Response } from 'express';
 import { Router } from 'express';
+import { resolveSessionPermissions } from './services/appRoles';
 
 export interface AuthUser {
   name: string;
   email: string;
+  loginName?: string;
 }
 
 interface OidcMetadata {
@@ -42,7 +44,7 @@ class AuthHttpError extends Error {
 export function normalizeBasePath(value = process.env.APP_BASE_PATH ?? '/sales-forecast') {
   const trimmed = value.trim();
   if (!trimmed || trimmed === '/') return '';
-  return `/${trimmed.replace(/^\/+|\/+$/g, '')}`;
+  return `/${trimmed.replace(/^\/+/, '').replace(/\/+$/, '')}`;
 }
 
 export function getAppPath() {
@@ -55,7 +57,7 @@ function isDevAuthBypass() {
 }
 
 function getDevUser(): AuthUser {
-  return { name: 'User (Dev)', email: 'dev.local' };
+  return { name: 'User (Dev)', email: 'dev.local', loginName: 'dev' };
 }
 
 function parseCookies(cookieHeader: string | undefined) {
@@ -215,7 +217,7 @@ function getSessionFromRequest(req: Request): SessionData | null {
 }
 
 function base64UrlDecode(value: string) {
-  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const normalized = value.replaceAll('-', '+').replaceAll('_', '/');
   const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
   return Buffer.from(padded, 'base64').toString('utf8');
 }
@@ -290,22 +292,25 @@ async function postFormJson<T>(url: string, params: URLSearchParams): Promise<T>
 
 function userFromClaims(claims: Record<string, unknown>): AuthUser {
   const preferredUsername = String(claims.preferred_username ?? '').trim();
+  const displayName = String(claims.name ?? claims.displayName ?? '').trim();
   const email = String(
     claims.email ||
     preferredUsername ||
     ''
   ).trim();
-  const name = String(preferredUsername || claims.name || claims.displayName || email || 'User').trim();
+  const name = String(displayName || preferredUsername || email || 'User').trim();
+  const loginName = preferredUsername || (email.includes('@') ? email.split('@')[0] : email) || name;
   return {
     name: name || email || 'User',
     email: email || 'unknown',
+    loginName: loginName.trim() || undefined,
   };
 }
 
 async function getOidcMetadata(): Promise<OidcMetadata> {
   const issuer = process.env.KEYCLOAK_ISSUER;
   if (!issuer) throw new Error('KEYCLOAK_ISSUER is not configured');
-  const normalizedIssuer = issuer.replace(/\/+$/g, '');
+  const normalizedIssuer = issuer.replace(/\/+$/, '');
   const discoveryUrl = `${normalizedIssuer}/.well-known/openid-configuration`;
   try {
     const response = await fetch(discoveryUrl);
@@ -331,7 +336,7 @@ function createCodeChallenge(codeVerifier: string) {
 }
 
 function getPublicBaseUrl() {
-  return (process.env.APP_BASE_URL ?? 'http://localhost:3000').replace(/\/+$/g, '');
+  return (process.env.APP_BASE_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
 }
 
 function getCallbackUrl() {
@@ -345,13 +350,13 @@ function getPostLogoutUrl() {
 function renderLoginPage(message?: string) {
   const authStartPath = `${normalizeBasePath()}/auth/start`;
   const safeMessage = message
-    ? message.replace(/[&<>"']/g, char => ({
+    ? [...message].map(char => ({
         '&': '&amp;',
         '<': '&lt;',
         '>': '&gt;',
         '"': '&quot;',
         "'": '&#39;',
-      }[char] ?? char))
+      }[char] ?? char)).join('')
     : '';
   return `<!doctype html>
 <html lang="en">
@@ -715,7 +720,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
 export function createAuthRouter() {
   const router = Router();
 
-  router.get('/me', (req, res) => {
+  router.get('/me', async (req, res) => {
     const user = getUserFromRequest(req);
     if (!user) {
       const basePath = normalizeBasePath();
@@ -724,7 +729,8 @@ export function createAuthRouter() {
         loginUrl: `${basePath}/auth/login`,
       });
     }
-    res.json({ authenticated: true, user });
+    const permissions = await resolveSessionPermissions(user);
+    res.json({ authenticated: true, user, permissions });
   });
 
   router.get('/login', (_req, res) => {

@@ -25,8 +25,8 @@ router.get('/', async (_req, res) => {
       select: { name: true },
     });
     res.json(rows.map((r) => r.name));
-  } catch (err) {
-    console.error('[versions] GET error:', err);
+  } catch (error) {
+    console.error('[versions] GET error:', error);
     res.status(500).json({ error: 'Failed to fetch versions' });
   }
 });
@@ -51,8 +51,8 @@ router.post('/', async (req, res) => {
       },
     });
     res.status(201).json({ ok: true, name: trimmedName });
-  } catch (err) {
-    console.error('[versions] POST error:', err);
+  } catch (error) {
+    console.error('[versions] POST error:', error);
     res.status(500).json({ error: 'Failed to create version' });
   }
 });

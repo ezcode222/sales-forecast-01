@@ -554,8 +554,8 @@ router.get('/', async (req, res) => {
             matchesActualOnlyFilters(row.registration, filters)
           )
     );
-  } catch (err) {
-    console.error('[actuals] GET error:', err);
+  } catch (error) {
+    console.error('[actuals] GET error:', error);
     res.status(500).json({ error: 'Failed to fetch actuals' });
   }
 });
@@ -591,8 +591,8 @@ router.post('/query', async (req, res) => {
         granularity
       )
     );
-  } catch (err) {
-    console.error('[actuals] POST query error:', err);
+  } catch (error) {
+    console.error('[actuals] POST query error:', error);
     res.status(500).json({ error: 'Failed to fetch actuals' });
   }
 });

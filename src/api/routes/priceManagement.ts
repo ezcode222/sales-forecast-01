@@ -123,8 +123,8 @@ router.get('/', async (req, res) => {
   try {
     const rows = await fetchRows({ ...bounds, priceType, versionName });
     res.json({ priceType, versionName, rows });
-  } catch (err) {
-    console.error('[price-management] GET error:', err);
+  } catch (error) {
+    console.error('[price-management] GET error:', error);
     res.status(500).json({ error: 'Failed to fetch price management data' });
   }
 });
@@ -172,8 +172,8 @@ router.patch('/bulk', async (req, res) => {
       }
     });
     res.json({ ok: true, updated: rows.length, priceType, versionName });
-  } catch (err) {
-    console.error('[price-management] PATCH error:', err);
+  } catch (error) {
+    console.error('[price-management] PATCH error:', error);
     res.status(500).json({ error: 'Failed to save price management data' });
   }
 });
@@ -211,8 +211,8 @@ router.post('/copy', async (req, res) => {
       }
     });
     res.json({ ok: true, copied: sourceRows.length, sourceVersion, targetVersion });
-  } catch (err) {
-    console.error('[price-management] COPY error:', err);
+  } catch (error) {
+    console.error('[price-management] COPY error:', error);
     res.status(500).json({ error: 'Failed to copy price management data' });
   }
 });
@@ -236,8 +236,8 @@ router.delete('/:month', async (req, res) => {
       await prisma.cplPrice.deleteMany({ where: { month } });
     }
     res.json({ ok: true });
-  } catch (err) {
-    console.error('[price-management] DELETE error:', err);
+  } catch (error) {
+    console.error('[price-management] DELETE error:', error);
     res.status(500).json({ error: 'Failed to remove price management data' });
   }
 });

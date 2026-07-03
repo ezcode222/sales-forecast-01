@@ -15,6 +15,9 @@ const CARRY_DETAIL_OPTIONS: Array<{ key: CarryDetailKey; label: string }> = [
   { key: 'carryTotal', label: 'Carry Total (In - Out)' },
 ];
 
+const checkboxClass =
+  'h-4 w-4 shrink-0 cursor-pointer rounded-md border-slate-300 text-[#007ABE] accent-[#007ABE] focus:ring-2 focus:ring-[#007ABE]/20';
+
 export function ColumnReorderPanel({
   open,
   onClose,
@@ -60,78 +63,92 @@ export function ColumnReorderPanel({
     <AnimatePresence>
       {open && (
         <>
-          <motion.div
+          <motion.button
+            type="button"
+            aria-label="Close column settings"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-40 bg-slate-900/20"
+            className="fixed inset-0 z-40 bg-slate-900/30 backdrop-blur-[2px]"
             onClick={onClose}
           />
           <motion.aside
-            initial={{ opacity: 0, x: 24 }}
+            initial={{ opacity: 0, x: 28 }}
             animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 24 }}
-            transition={{ duration: 0.2, ease: 'easeOut' }}
-            className="absolute right-0 top-0 bottom-0 z-50 w-72 max-w-[90vw] bg-white border-l border-slate-200 shadow-2xl flex flex-col"
+            exit={{ opacity: 0, x: 28 }}
+            transition={{ type: 'spring', duration: 0.32, bounce: 0.12 }}
+            className="absolute right-0 top-0 bottom-0 z-50 flex w-80 max-w-[92vw] flex-col overflow-hidden rounded-l-2xl border border-slate-200/80 bg-white shadow-[-8px_0_40px_rgba(15,23,42,0.12)]"
           >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <Columns3 size={14} className="text-blue-600" />
-                <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-700">
-                  Column Settings
-                </h3>
+            <header className="shrink-0 border-b border-slate-100 bg-gradient-to-r from-[#007ABE]/[0.07] to-transparent px-4 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#007ABE] text-white shadow-sm">
+                    <Columns3 size={16} strokeWidth={2.25} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold tracking-tight text-slate-900">Column Settings</h3>
+                    <p className="mt-0.5 text-[11px] text-slate-500">
+                      Drag to reorder · check to show
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-white/80 hover:text-slate-700"
+                  aria-label="Close"
+                >
+                  <X size={16} />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={onClose}
-                className="p-1 rounded hover:bg-slate-100 text-slate-400 transition-colors"
-                aria-label="Close"
-              >
-                <X size={14} />
-              </button>
-            </div>
-            <p className="px-4 py-2 text-[9px] text-slate-400 font-medium border-b border-slate-50">
-              Drag columns to change display order
-            </p>
-            <div className="px-3 py-2 border-b border-slate-100">
+            </header>
+
+            <div className="shrink-0 border-b border-slate-100 px-4 py-3">
               <div className="relative">
                 <Search
-                  size={13}
-                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+                  size={14}
+                  className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
                 />
                 <input
                   type="search"
                   value={columnSearch}
                   onChange={event => setColumnSearch(event.target.value)}
                   placeholder="Search columns..."
-                  className="w-full h-8 rounded-md border border-slate-200 bg-white pl-8 pr-8 text-[10px] font-medium text-slate-700 outline-none transition-colors focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                  className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50/60 pl-9 pr-9 text-xs font-medium text-slate-800 outline-none transition-all placeholder:text-slate-400 focus:border-[#007ABE]/40 focus:bg-white focus:ring-2 focus:ring-[#007ABE]/15"
                   autoFocus
                 />
                 {columnSearch && (
                   <button
                     type="button"
                     onClick={() => setColumnSearch('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
                     aria-label="Clear column search"
                   >
-                    <X size={12} />
+                    <X size={13} />
                   </button>
                 )}
               </div>
             </div>
-            <div className="flex-1 min-h-0 overflow-y-auto">
-              <div className="border-b border-slate-100 px-3 py-3">
-                <p className="mb-2 text-[9px] font-black uppercase tracking-widest text-slate-400">
-                  Monthly Carry Details
+
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <section className="border-b border-slate-100 px-4 py-4">
+                <p className="mb-2.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Monthly carry details
                 </p>
-                <div className="space-y-1">
+                <div className="space-y-1.5">
                   {CARRY_DETAIL_OPTIONS.map(option => (
                     <label
                       key={option.key}
-                      className="flex cursor-pointer items-center gap-2 rounded-md border border-slate-100 bg-blue-50/40 px-2.5 py-2 text-[10px] font-bold text-slate-700 hover:border-blue-200"
+                      className={cn(
+                        'flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-all',
+                        carryDetailVisibility[option.key]
+                          ? 'border-[#007ABE]/25 bg-[#007ABE]/[0.06] text-slate-800'
+                          : 'border-slate-200/80 bg-slate-50/50 text-slate-600 hover:border-slate-300 hover:bg-white'
+                      )}
                     >
                       <input
                         type="checkbox"
+                        className={checkboxClass}
                         checked={carryDetailVisibility[option.key]}
                         onChange={() => onToggleCarryDetail(option.key)}
                       />
@@ -139,70 +156,77 @@ export function ColumnReorderPanel({
                     </label>
                   ))}
                 </div>
-                <p className="mt-2 text-[8px] text-slate-400">Available in Month mode only</p>
-              </div>
+                <p className="mt-2.5 text-[10px] text-slate-400">Available in Month mode only</p>
+              </section>
 
-              <div className="space-y-1 p-2">
-                {filteredDefs.map(col => (
-                  <div
-                    key={col.key}
-                    draggable
-                    onDragStart={() => setDraggedKey(col.key)}
-                    onDragEnd={() => {
-                      setDraggedKey(null);
-                      setDragOverKey(null);
-                    }}
-                    onDragOver={e => {
-                      e.preventDefault();
-                      setDragOverKey(col.key);
-                    }}
-                    onDrop={e => {
-                      e.preventDefault();
-                      if (draggedKey) onReorder(draggedKey, col.key);
-                      setDraggedKey(null);
-                      setDragOverKey(null);
-                    }}
-                    className={cn(
-                      'flex items-center gap-2 px-2.5 py-2.5 rounded-lg border cursor-grab active:cursor-grabbing transition-all duration-150',
-                      dragOverKey === col.key
-                        ? 'border-blue-300 bg-blue-50/70 shadow-sm'
-                        : 'border-slate-100 bg-slate-50/60 hover:border-slate-200',
-                      draggedKey === col.key && 'opacity-50 scale-[0.98]'
-                    )}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={columnVisibility ? !!columnVisibility[col.key] : true}
-                      onChange={() => onToggleVisibility && onToggleVisibility(col.key)}
-                      className="shrink-0 mt-0.5"
-                      draggable={false}
-                      onPointerDown={e => e.stopPropagation()}
-                      aria-label={`Toggle ${col.label}`}
-                    />
-                    <span className="text-[10px] font-bold text-slate-700 truncate ml-2">{col.label}</span>
-                    <div className="ml-auto">
-                      <GripVertical size={12} className="text-slate-300 shrink-0" />
+              <section className="space-y-1.5 p-3">
+                {filteredDefs.map(col => {
+                  const isVisible = columnVisibility ? !!columnVisibility[col.key] : true;
+                  return (
+                    <div
+                      key={col.key}
+                      draggable
+                      onDragStart={() => setDraggedKey(col.key)}
+                      onDragEnd={() => {
+                        setDraggedKey(null);
+                        setDragOverKey(null);
+                      }}
+                      onDragOver={e => {
+                        e.preventDefault();
+                        setDragOverKey(col.key);
+                      }}
+                      onDrop={e => {
+                        e.preventDefault();
+                        if (draggedKey) onReorder(draggedKey, col.key);
+                        setDraggedKey(null);
+                        setDragOverKey(null);
+                      }}
+                      className={cn(
+                        'flex cursor-grab items-center gap-2.5 rounded-xl border px-3 py-2.5 transition-all duration-150 active:cursor-grabbing',
+                        dragOverKey === col.key
+                          ? 'border-[#007ABE]/40 bg-[#007ABE]/[0.08] shadow-sm'
+                          : isVisible
+                            ? 'border-slate-200/80 bg-white hover:border-slate-300 hover:shadow-sm'
+                            : 'border-slate-100 bg-slate-50/60 opacity-75 hover:border-slate-200',
+                        draggedKey === col.key && 'scale-[0.98] opacity-50'
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isVisible}
+                        onChange={() => onToggleVisibility && onToggleVisibility(col.key)}
+                        className={checkboxClass}
+                        draggable={false}
+                        onPointerDown={e => e.stopPropagation()}
+                        aria-label={`Toggle ${col.label}`}
+                      />
+                      <span className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-800">
+                        {col.label}
+                      </span>
+                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100/80 text-slate-400">
+                        <GripVertical size={13} />
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
                 {filteredDefs.length === 0 && (
-                  <div className="px-3 py-8 text-center text-[10px] text-slate-400">
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/80 px-4 py-10 text-center text-xs text-slate-400">
                     No matching columns
                   </div>
                 )}
-              </div>
-
-              <div className="border-t border-slate-100 p-3">
-                <button
-                  type="button"
-                  onClick={onReset}
-                  className="w-full text-[9px] font-bold uppercase py-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center justify-center gap-1 transition-colors"
-                >
-                  <RotateCcw size={10} />
-                  Reset column order
-                </button>
-              </div>
+              </section>
             </div>
+
+            <footer className="shrink-0 border-t border-slate-100 bg-slate-50/80 p-4">
+              <button
+                type="button"
+                onClick={onReset}
+                className="flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-[11px] font-bold uppercase tracking-wide text-slate-600 shadow-sm transition-all hover:border-slate-300 hover:bg-slate-50"
+              >
+                <RotateCcw size={12} />
+                Reset column order
+              </button>
+            </footer>
           </motion.aside>
         </>
       )}

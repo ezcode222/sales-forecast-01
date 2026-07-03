@@ -359,7 +359,7 @@ function createData(body: Record<string, unknown>) {
   const plantCode = text(body.plantCode);
   const materialCode = text(body.materialCode);
   const registrationTopic =
-    text(body.registrationTopic) || `WEB_${plantCode}_${materialCode}_${ownerName}`.replace(/\s+/g, '_');
+    text(body.registrationTopic) || `WEB_${plantCode}_${materialCode}_${ownerName}`.split(/\s+/).join('_');
   const soldToCode = text(body.soldToCode) || '0';
   const shipToCode = text(body.shipToCode) || '0';
   const endUserCode = text(body.endUserCode) || '0';

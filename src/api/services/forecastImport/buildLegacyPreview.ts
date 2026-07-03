@@ -1,0 +1,382 @@
+import type * as XLSX from 'xlsx';
+import prisma from '../../../db/prisma';
+import {
+  formatForecastPeriodForApi,
+  parseForecastPeriodToDate,
+} from '../../../lib/forecastPeriod';
+import type { CurrentForecastImportPreview } from '../../../lib/api';
+import { businessUnitFromPlantCode } from '../businessUnit';
+import { CURRENT_FORECAST_VERSION, LEGACY_PREVIEW_CONTRACT_VERSION, PREVIEW_IMPORTABLE_SAMPLE_SIZE, PREVIEW_OVERWRITE_SAMPLE_SIZE, PREVIEW_UNIFIED_ROWS_SAMPLE_SIZE, PREVIEW_UNMATCHED_ROWS_SAMPLE_SIZE } from './constants';
+import { blockedRowKey, getOnOffFromKey, primarySourceEntry } from './excelUtils';
+import {
+  mergeLegacySheetResults,
+  parseLegacyImportSheet,
+  resolveLegacyImportSheets,
+} from './legacySheetParse';
+import {
+  diagnoseUnmatchedRows,
+  findActualSummaries,
+  findRegistrationMatches,
+} from './matching';
+import type { ConfirmLegacyImportRecord, LegacyNormalizedImportRecord, UnifiedPreviewRow } from './types';
+import { storePreviewCache } from './previewCache';
+
+export type LegacyPreviewResult = CurrentForecastImportPreview & {
+  importMode: 'current_forecast';
+  previewId: string;
+};
+
+export class LegacyPreviewValidationError extends Error {
+  readonly details: Record<string, unknown>;
+
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = 'LegacyPreviewValidationError';
+    this.details = details;
+  }
+}
+
+export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise<LegacyPreviewResult> {
+  const resolvedSheets = resolveLegacyImportSheets(workbook);
+  if (resolvedSheets.length === 0) {
+    throw new LegacyPreviewValidationError(
+      'No import sheet found. A sheet must have column A header "Key for no regist" and at least one MMM-YY forecast column (for example JUL-26).',
+      { sheets: workbook.SheetNames }
+    );
+  }
+
+  const sheetResults = resolvedSheets.map(({ sheetName, sheet }) =>
+    parseLegacyImportSheet(sheetName, sheet)
+  );
+  const merged = mergeLegacySheetResults(sheetResults);
+  const {
+    sheetNames,
+    totalDataRows,
+    forecastColumns,
+    headerErrors,
+    detectedHeaders,
+    missingKeyRows,
+    invalidNumericValues,
+    excelGroups,
+    crossSheetDuplicateKeys,
+  } = merged;
+
+  if (forecastColumns.length === 0) {
+    throw new LegacyPreviewValidationError(
+      'No forecast month columns were found. Use headers such as JUN-26 or JUL-26.',
+      { detectedHeaders, headerErrors }
+    );
+  }
+
+  const sheetNameLabel = sheetNames.join(' + ');
+
+  const duplicateExcelKeys = [...excelGroups.values()]
+    .filter(group => group.sourceSheetRows.length > 1)
+    .map(group => ({
+      excelKeyForNoRegist: group.keyNoRegist,
+      sourceRows: group.sourceRows,
+      sourceSheet: primarySourceEntry(group).sourceSheet,
+      entries: group.sourceSheetRows,
+    }));
+
+  const skippedKeyGroups = [...excelGroups.values()]
+    .filter(group => group.hasInvalidNumber)
+    .map(group => {
+      const invalids = invalidNumericValues.filter(
+        item => item.excelKeyForNoRegist === group.keyNoRegist
+      );
+      const reason = invalids.length > 0
+        ? invalids
+          .map(item => `Invalid number in ${item.header} (col ${item.column}): "${String(item.value ?? '')}"`)
+          .join('; ')
+        : 'Invalid forecast number in one or more month columns';
+      const primary = primarySourceEntry(group);
+      return {
+        excelKeyForNoRegist: group.keyNoRegist,
+        sourceRows: group.sourceRows,
+        sourceSheet: primary.sourceSheet,
+        reason,
+        reasonCode: 'invalid_forecast_number' as const,
+      };
+    });
+
+  const [registrationMatches, actualSummaries] = await Promise.all([
+    findRegistrationMatches([...excelGroups.keys()]),
+    findActualSummaries([...excelGroups.keys()], forecastColumns),
+  ]);
+
+  const unmatchedRows: Awaited<ReturnType<typeof diagnoseUnmatchedRows>> = [];
+  const duplicateRegistrationMatches: Array<{
+    sourceSheet: string;
+    sourceRow: number;
+    excelKeyForNoRegist: string;
+    matchedRegistrationIds: string[];
+  }> = [];
+  const candidateRecords: LegacyNormalizedImportRecord[] = [];
+  const rawUnmatchedRows: Array<{ sourceSheet: string; sourceRow: number; excelKeyForNoRegist: string }> = [];
+
+  for (const group of excelGroups.values()) {
+    if (group.hasInvalidNumber) continue;
+    const primary = primarySourceEntry(group);
+    const sourceRow = primary.sourceRow;
+    const excelKeyForNoRegist = group.keyNoRegist;
+    const matches = registrationMatches.get(group.keyNoRegist) ?? [];
+    if (matches.length === 0) {
+      rawUnmatchedRows.push({
+        sourceSheet: primary.sourceSheet,
+        sourceRow,
+        excelKeyForNoRegist,
+      });
+      continue;
+    }
+    if (matches.length > 1) {
+      duplicateRegistrationMatches.push({
+        sourceSheet: primary.sourceSheet,
+        sourceRow,
+        excelKeyForNoRegist,
+        matchedRegistrationIds: matches.map(match => match.registrationId),
+      });
+      continue;
+    }
+
+    const rowRecords: LegacyNormalizedImportRecord[] = forecastColumns.map((forecastColumn, forecastIndex) => ({
+      sourceRow,
+      excelKeyForNoRegist,
+      matchedRegistrationId: matches[0].registrationId,
+      version: CURRENT_FORECAST_VERSION,
+      sourceColumn: forecastColumn.col,
+      sourceMonthHeader: forecastColumn.header,
+      forecastMonth: forecastColumn.month,
+      period: forecastColumn.period,
+      granularity: 'week',
+      qtyFcst: group.forecastValues[forecastIndex],
+    }));
+
+    candidateRecords.push(...rowRecords);
+  }
+
+  unmatchedRows.push(...await diagnoseUnmatchedRows(rawUnmatchedRows, actualSummaries));
+
+  const hasBlockingHeaderErrors = headerErrors.length > 0 || crossSheetDuplicateKeys.length > 0;
+  const matchedRegistrationIds = hasBlockingHeaderErrors
+    ? []
+    : [...new Set(candidateRecords.map(record => record.matchedRegistrationId))];
+  const periods = forecastColumns.map(column => column.period);
+  const existingRows = matchedRegistrationIds.length > 0
+    ? await prisma.forecastValue.findMany({
+        where: {
+          versionName: CURRENT_FORECAST_VERSION,
+          registrationId: { in: matchedRegistrationIds },
+          period: { in: periods.map(period => parseForecastPeriodToDate(period, 'week')) },
+        },
+        select: {
+          registrationId: true,
+          period: true,
+          qtyFcst: true,
+          priceFcst: true,
+          granularity: true,
+        },
+      })
+    : [];
+
+  const existingRowMap = new Map(
+    existingRows.map(row => [
+      `${row.registrationId}|${formatForecastPeriodForApi(row.period, row.granularity)}`,
+      row,
+    ])
+  );
+  const importableRecords = hasBlockingHeaderErrors
+    ? []
+    : candidateRecords.map(record => {
+        const existing = existingRowMap.get(`${record.matchedRegistrationId}|${record.period}`);
+        return {
+          ...record,
+          action: existing ? 'overwrite' as const : 'create' as const,
+          oldQtyFcst: existing ? Number(existing.qtyFcst) : null,
+        };
+      });
+  const overwriteRecords = importableRecords
+    .filter(record => record.action === 'overwrite')
+    .map(record => ({
+      sourceRow: record.sourceRow,
+      excelKeyForNoRegist: record.excelKeyForNoRegist,
+      matchedRegistrationId: record.matchedRegistrationId,
+      period: record.period,
+      sourceMonthHeader: record.sourceMonthHeader,
+      oldQtyFcst: record.oldQtyFcst ?? 0,
+      newQtyFcst: record.qtyFcst,
+    }));
+  const createRecords = importableRecords.filter(record => record.action === 'create');
+
+  function toConfirmRecords(records: LegacyNormalizedImportRecord[]): ConfirmLegacyImportRecord[] {
+    return records.map(record => ({
+      excelKeyForNoRegist: record.excelKeyForNoRegist,
+      matchedRegistrationId: record.matchedRegistrationId,
+      period: record.period,
+      granularity: record.granularity,
+      qtyFcst: record.qtyFcst,
+    }));
+  }
+
+  const cacheEntry = storePreviewCache({
+    importMode: 'current_forecast',
+    previewContractVersion: LEGACY_PREVIEW_CONTRACT_VERSION,
+    targetVersion: CURRENT_FORECAST_VERSION,
+    legacyRecords: toConfirmRecords(importableRecords),
+    amountMismatchCount: 0,
+  });
+
+  const unifiedPreviewRows: UnifiedPreviewRow[] = [];
+  const previewKeySet = new Set<string>();
+  for (const group of excelGroups.values()) {
+    if (group.hasInvalidNumber) continue;
+    const registration = registrationMatches.get(group.keyNoRegist)?.[0];
+    const actual = actualSummaries.get(group.keyNoRegist);
+    const hasActual = Boolean(actual);
+    previewKeySet.add(group.keyNoRegist);
+
+    if (!registration) {
+      unifiedPreviewRows.push({
+        sourceRow: group.sourceRows[0],
+        sourceRows: group.sourceRows,
+        status: 'proposed_registration',
+        keyRegist: null,
+        keyNoRegist: group.keyNoRegist,
+        country: actual?.country ?? group.country,
+        soldTo: actual?.soldTo ?? group.soldTo,
+        shipTo: actual?.shipTo ?? group.shipTo,
+        enduser: actual?.enduser ?? group.enduser,
+        plant: actual?.plant ?? group.plant,
+        materialCode: actual?.materialCode ?? group.materialCode,
+        onOff: group.onOff ?? getOnOffFromKey(group.keyNoRegist),
+        process: group.process,
+        application: group.application,
+        subApplication: group.subApplication,
+        owner: group.owner,
+        qtyActual: Number(actual?.qtyActual ?? 0),
+        qtyFcst: group.forecastValues.reduce((sum, value) => sum + value, 0),
+        businessUnit: group.businessUnit ?? businessUnitFromPlantCode(actual?.plant ?? group.plant),
+        dimensionSource: actual ? 'actual_with_excel_fallback' : 'excel',
+      });
+      continue;
+    }
+
+    unifiedPreviewRows.push({
+      sourceRow: group.sourceRows[0],
+      sourceRows: group.sourceRows,
+      status: hasActual ? 'matched' : 'registration_only',
+      keyRegist: registration.registrationId,
+      keyNoRegist: group.keyNoRegist,
+      country: registration.country ?? actual?.country ?? null,
+      soldTo: registration.soldTo ?? actual?.soldTo ?? null,
+      shipTo: registration.shipTo ?? actual?.shipTo ?? null,
+      enduser: registration.enduser ?? actual?.enduser ?? null,
+      plant: registration.plant ?? actual?.plant ?? null,
+      materialCode: registration.materialCode ?? actual?.materialCode ?? null,
+      onOff: registration.onOff ?? getOnOffFromKey(group.keyNoRegist),
+      process: registration.process,
+      application: registration.application,
+      subApplication: registration.subApplication,
+      owner: registration.owner,
+      qtyActual: Number(actual?.qtyActual ?? 0),
+      qtyFcst: group.forecastValues.reduce((sum, value) => sum + value, 0),
+      businessUnit: registration.businessUnit ?? group.businessUnit,
+      dimensionSource: hasActual ? 'registration_with_actual_fallback' : 'registration',
+    });
+  }
+
+  for (const actual of actualSummaries.values()) {
+    if (actual.keyForRegist || previewKeySet.has(actual.keyForNoRegist)) continue;
+    unifiedPreviewRows.push({
+      sourceRow: null,
+      sourceRows: [],
+      status: 'actual_only',
+      keyRegist: null,
+      keyNoRegist: actual.keyForNoRegist,
+      country: actual.country,
+      soldTo: actual.soldTo,
+      shipTo: actual.shipTo,
+      enduser: actual.enduser,
+      plant: actual.plant,
+      materialCode: actual.materialCode,
+      onOff: getOnOffFromKey(actual.keyForNoRegist),
+      process: null,
+      application: null,
+      subApplication: null,
+      owner: null,
+      qtyActual: Number(actual.qtyActual),
+      qtyFcst: 0,
+      businessUnit: null,
+      dimensionSource: 'actual',
+    });
+  }
+
+  unifiedPreviewRows.sort((a, b) => {
+    const order = { matched: 0, registration_only: 1, proposed_registration: 2, actual_only: 3 };
+    return order[a.status] - order[b.status] || a.keyNoRegist.localeCompare(b.keyNoRegist);
+  });
+  const matchedRows = unifiedPreviewRows.filter(row => row.status === 'matched').length;
+  const actualOnlyRows = unifiedPreviewRows.filter(row => row.status === 'actual_only').length;
+  const registrationOnlyRows = unifiedPreviewRows.filter(row => row.status === 'registration_only').length;
+  const proposedRegistrationRows = unifiedPreviewRows.filter(row => row.status === 'proposed_registration').length;
+
+  const blockedRows = new Set<string>([
+    ...missingKeyRows.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
+    ...unmatchedRows.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
+    ...duplicateRegistrationMatches.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
+    ...invalidNumericValues.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
+    ...crossSheetDuplicateKeys.flatMap(item =>
+      item.entries.map(entry => blockedRowKey(entry.sourceSheet, entry.sourceRow))
+    ),
+  ]);
+
+  return {
+    previewId: cacheEntry.previewId,
+    importMode: 'current_forecast',
+    previewContractVersion: LEGACY_PREVIEW_CONTRACT_VERSION,
+    summary: {
+      sheetName: sheetNameLabel,
+      sheetNames,
+      version: CURRENT_FORECAST_VERSION,
+      totalRows: totalDataRows,
+      validRows: hasBlockingHeaderErrors ? 0 : totalDataRows - blockedRows.size,
+      importableRecords: importableRecords.length,
+      candidateRecords: candidateRecords.length,
+      headerErrors: headerErrors.length,
+      missingKeyRows: missingKeyRows.length,
+      unmatchedRows: unmatchedRows.length,
+      duplicateExcelKeys: duplicateExcelKeys.length,
+      duplicateRegistrationMatches: duplicateRegistrationMatches.length,
+      crossSheetDuplicateKeys: crossSheetDuplicateKeys.length,
+      invalidNumericValues: invalidNumericValues.length,
+      existingDbConflicts: 0,
+      createRecords: createRecords.length,
+      overwriteRecords: overwriteRecords.length,
+      matchedRows,
+      actualOnlyRows,
+      registrationOnlyRows,
+      proposedRegistrationRows,
+      uniqueExcelKeys: excelGroups.size,
+      groupedDuplicateKeys: duplicateExcelKeys.length,
+      skippedKeyGroups: skippedKeyGroups.length,
+    },
+    expectedForecastColumns: forecastColumns,
+    detectedHeaders,
+    headerErrors,
+    missingKeyRows,
+    duplicateExcelKeys,
+    crossSheetDuplicateKeys,
+    skippedKeyGroups,
+    unmatchedRows: unmatchedRows.slice(0, PREVIEW_UNMATCHED_ROWS_SAMPLE_SIZE),
+    duplicateRegistrationMatches,
+    invalidNumericValues,
+    existingDbConflicts: [],
+    overwriteRecords: overwriteRecords.slice(0, PREVIEW_OVERWRITE_SAMPLE_SIZE),
+    unifiedPreviewRows: unifiedPreviewRows.slice(0, PREVIEW_UNIFIED_ROWS_SAMPLE_SIZE),
+    importableRecords: importableRecords.slice(0, PREVIEW_IMPORTABLE_SAMPLE_SIZE).map(record => ({
+      ...record,
+      action: record.action ?? 'create',
+      oldQtyFcst: record.oldQtyFcst ?? null,
+    })),
+  };
+}

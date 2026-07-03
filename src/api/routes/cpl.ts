@@ -20,8 +20,8 @@ router.get('/', async (req, res) => {
       rows = await prisma.cplPrice.findMany({ orderBy: { month: 'asc' } });
     }
     res.json(rows.map((r) => ({ month: r.month, price: Number(r.price) })));
-  } catch (err) {
-    console.error('[cpl] GET error:', err);
+  } catch (error) {
+    console.error('[cpl] GET error:', error);
     res.status(500).json({ error: 'Failed to fetch CPL prices' });
   }
 });
@@ -46,8 +46,8 @@ router.post('/', async (req, res) => {
       create: { month, price: numPrice },
     });
     res.status(201).json({ ok: true, month, price: numPrice });
-  } catch (err) {
-    console.error('[cpl] POST error:', err);
+  } catch (error) {
+    console.error('[cpl] POST error:', error);
     res.status(500).json({ error: 'Failed to create CPL price' });
   }
 });
@@ -72,8 +72,8 @@ router.patch('/:month', async (req, res) => {
       return res.status(404).json({ error: `No CPL price found for month ${month}` });
     }
     res.json({ ok: true, month, price: numPrice });
-  } catch (err) {
-    console.error('[cpl] PATCH error:', err);
+  } catch (error) {
+    console.error('[cpl] PATCH error:', error);
     res.status(500).json({ error: 'Failed to update CPL price' });
   }
 });
@@ -84,8 +84,8 @@ router.delete('/:month', async (req, res) => {
   try {
     await prisma.cplPrice.deleteMany({ where: { month } });
     res.json({ ok: true });
-  } catch (err) {
-    console.error('[cpl] DELETE error:', err);
+  } catch (error) {
+    console.error('[cpl] DELETE error:', error);
     res.status(500).json({ error: 'Failed to delete CPL price' });
   }
 });

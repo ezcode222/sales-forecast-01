@@ -19,6 +19,12 @@ import {
   monthKeyToFirstOfMonth,
   parseForecastPeriodToDate,
 } from '../../lib/forecastPeriod';
+import { queueForecastChangeNotification } from '../services/forecastChangeNotification';
+import { sendForecastChangeEmails } from '../services/overplanNotification';
+import {
+  buildForecastChangeBatches,
+  sampleForecastChangePreview,
+} from '../services/notificationPreview';
 
 const router = Router();
 const SUMMARY_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -73,6 +79,7 @@ const summaryCache = new Map<
 
 export function clearForecastSummaryCache() {
   summaryCache.clear();
+  void import('./overplan').then(module => module.clearOverplanEvaluateCache());
 }
 
 function stableJson(value: unknown): string {
@@ -116,13 +123,14 @@ function normalizeForecastUpdates(updates: unknown[]) {
     const granularity = normalizeGranularity(item.granularity);
     const qtyFcst = Number(item.qtyFcst ?? 0);
     const priceFcst = Number(item.priceFcst ?? 0);
+    if (!Number.isFinite(qtyFcst) || qtyFcst < 0) continue;
     normalized.set(`${registrationId}|${versionName}|${periodKey}`, {
       registrationId,
       versionName,
       period: parseForecastPeriodToDate(periodKey, granularity),
       periodKey,
       granularity,
-      qtyFcst: Number.isFinite(qtyFcst) ? qtyFcst : 0,
+      qtyFcst,
       priceFcst: Number.isFinite(priceFcst) ? priceFcst : 0,
     });
   }
@@ -162,6 +170,29 @@ function mapAuditRow(row: Prisma.ForecastChangeLogGetPayload<{ include: { batch:
     newPriceFcst: Number(row.newPriceFcst),
     changedAt: row.changedAt,
   };
+}
+
+function buildCellAuditWhere(
+  registrationId: string,
+  versionName: string,
+  period: string
+): Prisma.ForecastChangeLogWhereInput {
+  if (/^\d{4}-\d{2}$/.test(period)) {
+    return {
+      registrationId,
+      versionName,
+      period: {
+        gte: monthKeyToFirstOfMonth(period),
+        lte: monthKeyToEndOfMonth(period),
+      },
+    };
+  }
+
+  const periodDate = parseForecastPeriodToDate(
+    period,
+    /^\d{4}-\d{2}-\d{2}$/.test(period) ? 'week' : 'month'
+  );
+  return { registrationId, versionName, period: periodDate };
 }
 
 async function nextForecastVersionKey(transaction: Pick<typeof prisma, '$queryRaw'>) {
@@ -641,8 +672,8 @@ router.post('/summary', async (req, res) => {
 
   try {
     res.json(await promise);
-  } catch (err) {
-    console.error('[forecast] POST summary error:', err);
+  } catch (error) {
+    console.error('[forecast] POST summary error:', error);
     res.status(500).json({ error: 'Failed to calculate forecast summary' });
   }
 });
@@ -700,8 +731,8 @@ router.get('/fact-forecast', async (req, res) => {
       amount: Number(row.amount ?? 0),
       stampPeriod: row.stampPeriod ?? 'No',
     })));
-  } catch (err) {
-    console.error('[forecast] GET fact forecast error:', err);
+  } catch (error) {
+    console.error('[forecast] GET fact forecast error:', error);
     res.status(500).json({ error: 'Failed to fetch FactForecast data' });
   }
 });
@@ -713,11 +744,7 @@ router.get('/audit/cell', async (req, res) => {
   }
 
   try {
-    const periodDate = parseForecastPeriodToDate(
-      period,
-      /^\d{4}-\d{2}$/.test(period) ? 'month' : 'week'
-    );
-    const where = { registrationId, versionName: version, period: periodDate };
+    const where = buildCellAuditWhere(registrationId, version, period);
     const [totalChanges, latestRows] = await Promise.all([
       prisma.forecastChangeLog.count({ where }),
       prisma.forecastChangeLog.findMany({
@@ -731,8 +758,8 @@ router.get('/audit/cell', async (req, res) => {
       totalChanges,
       latestChanges: latestRows.map(mapAuditRow),
     });
-  } catch (err) {
-    console.error('[forecast] GET audit cell error:', err);
+  } catch (error) {
+    console.error('[forecast] GET audit cell error:', error);
     res.status(500).json({ error: 'Failed to fetch forecast cell audit history' });
   }
 });
@@ -756,8 +783,8 @@ router.get('/audit', async (req, res) => {
       take: 500,
     });
     res.json(rows.map(mapAuditRow));
-  } catch (err) {
-    console.error('[forecast] GET audit error:', err);
+  } catch (error) {
+    console.error('[forecast] GET audit error:', error);
     res.status(500).json({ error: 'Failed to fetch forecast audit history' });
   }
 });
@@ -798,8 +825,8 @@ router.get('/', async (req, res) => {
       qtyFcst:        Number(r.qtyFcst),
       priceFcst:      Number(r.priceFcst),
     })));
-  } catch (err) {
-    console.error('[forecast] GET error:', err);
+  } catch (error) {
+    console.error('[forecast] GET error:', error);
     res.status(500).json({ error: 'Failed to fetch forecast data' });
   }
 });
@@ -822,6 +849,13 @@ router.patch('/', async (req, res) => {
   const stampPeriod = normalizeStampPeriod(req.body?.stampPeriod);
   if (!Array.isArray(updates) || updates.length === 0) {
     return res.status(400).json({ error: 'Body must be a non-empty array of forecast values' });
+  }
+  for (const value of updates) {
+    if (!value || typeof value !== 'object') continue;
+    const qtyFcst = Number((value as Record<string, unknown>).qtyFcst);
+    if (Number.isFinite(qtyFcst) && qtyFcst < 0) {
+      return res.status(400).json({ error: 'Forecast quantity cannot be negative.' });
+    }
   }
   const normalizedUpdates = normalizeForecastUpdates(updates);
   if (normalizedUpdates.length === 0) {
@@ -925,9 +959,29 @@ router.patch('/', async (req, res) => {
           }),
         });
       }
-      return { batchId: batch.id, changed: changedUpdates.length };
+      return {
+        batchId: batch.id,
+        changed: changedUpdates.length,
+        notificationChanges: changedUpdates.map(update => {
+          const oldValue = existingMap.get(`${update.registrationId}|${update.versionName}|${update.periodKey}`);
+          return {
+            registrationId: update.registrationId,
+            periodKey: update.periodKey,
+            oldQtyFcst: oldValue ? Number(oldValue.qtyFcst) : null,
+            newQtyFcst: update.qtyFcst,
+          };
+        }),
+      };
     });
     clearForecastSummaryCache();
+
+    if (result.notificationChanges.length > 0) {
+      queueForecastChangeNotification({
+        changedBy,
+        commitBatchId: result.batchId,
+        changes: result.notificationChanges,
+      });
+    }
 
     res.json({
       ok: true,
@@ -935,9 +989,85 @@ router.patch('/', async (req, res) => {
       batchId: result.batchId,
       changed: result.changed,
     });
-  } catch (err) {
-    console.error('[forecast] PATCH error:', err);
+  } catch (error) {
+    console.error('[forecast] PATCH error:', error);
     res.status(500).json({ error: 'Failed to save forecast data' });
+  }
+});
+
+router.post('/preview-commit-email', async (req, res) => {
+  try {
+    const body = req.body as {
+      changedBy?: string;
+      changes?: Array<{
+        ownerName: string;
+        materialCode: string;
+        materialDescription: string;
+        plantCode?: string;
+        period: string;
+        oldQtyFcst: number | null;
+        newQtyFcst: number;
+      }>;
+      useSample?: boolean;
+    };
+
+    const payload = body.useSample === false && body.changes && body.changes.length > 0
+      ? {
+          changedBy: String(body.changedBy ?? DEFAULT_CHANGED_BY),
+          changes: body.changes,
+        }
+      : sampleForecastChangePreview();
+
+    const batches = await buildForecastChangeBatches(payload);
+    res.json({
+      ok: true,
+      previewOnly: true,
+      sent: 0,
+      batches,
+    });
+  } catch (error) {
+    console.error('[forecast] preview-commit-email error:', error);
+    res.status(400).json({
+      error: error instanceof Error ? error.message : 'Failed to preview forecast change notification',
+    });
+  }
+});
+
+router.post('/send-commit-email', async (req, res) => {
+  try {
+    const body = req.body as {
+      changedBy?: string;
+      changes?: Array<{
+        ownerName: string;
+        materialCode: string;
+        materialDescription: string;
+        plantCode?: string;
+        period: string;
+        oldQtyFcst: number | null;
+        newQtyFcst: number;
+      }>;
+    };
+
+    if (!body.changes || body.changes.length === 0) {
+      res.status(400).json({ error: 'No forecast changes to send' });
+      return;
+    }
+
+    const result = await sendForecastChangeEmails({
+      changedBy: String(body.changedBy ?? DEFAULT_CHANGED_BY),
+      changes: body.changes,
+    });
+
+    res.json({
+      ok: true,
+      sent: result.sent,
+      skipped: result.skipped,
+    });
+  } catch (error) {
+    console.error('[forecast] send-commit-email error:', error);
+    res.status(400).json({
+      error: error instanceof Error ? error.message : 'Failed to send forecast change notification',
+    });
   }
 });
 
