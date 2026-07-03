@@ -96,7 +96,7 @@ const STAMP_PERIOD_OPTIONS = ['No', 'Weekly1', 'Weekly2', 'Weekly3', 'Weekly4', 
 const CURRENT_FORECAST_VERSION = 'Current Forecast';
 const GLOBAL_PRICE_VERSION = 'GLOBAL';
 
-interface PendingForecastEdit {
+interface PendingCellEdit {
   registrationId: string;
   period: string;
   version: string;
@@ -104,21 +104,9 @@ interface PendingForecastEdit {
   currentValue: number;
 }
 
-interface PendingPriceEdit {
-  registrationId: string;
-  period: string;
-  version: string;
-  baseValue: number;
-  currentValue: number;
-}
-
-interface PendingAmountEdit {
-  registrationId: string;
-  period: string;
-  version: string;
-  baseValue: number;
-  currentValue: number;
-}
+type PendingForecastEdit = PendingCellEdit;
+type PendingPriceEdit = PendingCellEdit;
+type PendingAmountEdit = PendingCellEdit;
 
 interface InventoryCommitPreviewRow {
   key: string;
@@ -135,10 +123,14 @@ function ignorePromise(promise: Promise<unknown>) {
   promise.catch(() => undefined);
 }
 
-function restorePendingForecastEdits(
-  previous: Record<string, PendingForecastEdit>,
-  edits: PendingForecastEdit[]
-) {
+function pendingEditValues<T extends PendingCellEdit>(edits: Record<string, T>): T[] {
+  return Object.values(edits);
+}
+
+function restorePendingEdits<T extends PendingCellEdit>(
+  previous: Record<string, T>,
+  edits: T[]
+): Record<string, T> {
   const restored = { ...previous };
   for (const edit of edits) {
     restored[`${edit.registrationId}|${edit.version}|${edit.period}`] = edit;
@@ -146,26 +138,13 @@ function restorePendingForecastEdits(
   return restored;
 }
 
-function restorePendingPriceEdits(
-  previous: Record<string, PendingPriceEdit>,
-  edits: PendingPriceEdit[]
-) {
-  const restored = { ...previous };
-  for (const edit of edits) {
-    restored[`${edit.registrationId}|${edit.version}|${edit.period}`] = edit;
-  }
-  return restored;
-}
-
-function restorePendingAmountEdits(
-  previous: Record<string, PendingAmountEdit>,
-  edits: PendingAmountEdit[]
-) {
-  const restored = { ...previous };
-  for (const edit of edits) {
-    restored[`${edit.registrationId}|${edit.version}|${edit.period}`] = edit;
-  }
-  return restored;
+function withoutRegistrationEdits<T extends { registrationId: string }>(
+  previous: Record<string, T>,
+  registrationId: string
+): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(previous).filter(([, edit]) => edit.registrationId !== registrationId)
+  );
 }
 
 function seedPriceStateFromForecasts(forecasts: ForecastValue[]) {
@@ -496,8 +475,8 @@ export default function App() {
     const pricingMonth = monthKey(month);
     setFormulaMap(prev => new Map(prev).set(regId, 'Fixed Price'));
     setFixedPriceMap(prev => {
-      const next = new Map(prev as Map<string, Map<string, number>>);
-      const regPrices = new Map<string, number>(next.get(regId));
+      const next = new Map(prev);
+      const regPrices = new Map<string, number>(prev.get(regId));
       regPrices.set(pricingMonth, price);
       next.set(regId, regPrices);
       return next;
@@ -1429,7 +1408,7 @@ export default function App() {
         inventoryByMaterialKey.get(`${registration.plantCode}|${registration.materialCode}`);
       if (!inventory) return registration;
       const cached = mergedRegistrationCacheRef.current.get(registration.id);
-      if (cached?.registration === registration && cached.inventory === inventory) {
+      if (cached?.registration === registration && cached?.inventory === inventory) {
         return cached.merged;
       }
       const merged = {
@@ -1607,7 +1586,7 @@ export default function App() {
     const periods = forecastSummary.periods.map(period => ({ ...period }));
     const periodIndex = new Map(periods.map((period, index) => [period.period, index]));
 
-    (Object.values(pendingForecastEdits) as PendingForecastEdit[]).forEach(edit => {
+    pendingEditValues(pendingForecastEdits).forEach(edit => {
       if (edit.version !== selectedVersion) return;
       const displayPeriod = forecastMode === 'month'
         ? edit.period.slice(0, 7)
@@ -1699,17 +1678,17 @@ export default function App() {
   }, [forecastMode, selectedVersion]);
 
   const pendingForecastEditList = useMemo(
-    () => Object.values(pendingForecastEdits) as PendingForecastEdit[],
+    () => pendingEditValues(pendingForecastEdits),
     [pendingForecastEdits]
   );
 
   const pendingPriceEditList = useMemo(
-    () => Object.values(pendingPriceEdits) as PendingPriceEdit[],
+    () => pendingEditValues(pendingPriceEdits),
     [pendingPriceEdits]
   );
 
   const pendingAmountEditList = useMemo(
-    () => Object.values(pendingAmountEdits) as PendingAmountEdit[],
+    () => pendingEditValues(pendingAmountEdits),
     [pendingAmountEdits]
   );
 
@@ -1887,9 +1866,9 @@ export default function App() {
           setIsForecastSummaryUpdating(false);
         }
       } catch (error) {
-        setPendingForecastEdits(previous => restorePendingForecastEdits(previous, qtyEditsToCommit));
-        setPendingPriceEdits(previous => restorePendingPriceEdits(previous, priceEditsToCommit));
-        setPendingAmountEdits(previous => restorePendingAmountEdits(previous, amountEditsToCommit));
+        setPendingForecastEdits(previous => restorePendingEdits(previous, qtyEditsToCommit));
+        setPendingPriceEdits(previous => restorePendingEdits(previous, priceEditsToCommit));
+        setPendingAmountEdits(previous => restorePendingEdits(previous, amountEditsToCommit));
         setAppError(error instanceof ApiError ? error.message : 'Failed to commit forecast updates');
       }
     };
@@ -2075,18 +2054,9 @@ export default function App() {
       setForecastData(previous =>
         previous.filter(item => item.registrationId !== registrationId)
       );
-      setPendingForecastEdits(previous => Object.fromEntries(
-        (Object.entries(previous) as Array<[string, PendingForecastEdit]>)
-          .filter(([, edit]) => edit.registrationId !== registrationId)
-      ) as Record<string, PendingForecastEdit>);
-      setPendingPriceEdits(previous => Object.fromEntries(
-        (Object.entries(previous) as Array<[string, PendingPriceEdit]>)
-          .filter(([, edit]) => edit.registrationId !== registrationId)
-      ) as Record<string, PendingPriceEdit>);
-      setPendingAmountEdits(previous => Object.fromEntries(
-        (Object.entries(previous) as Array<[string, PendingAmountEdit]>)
-          .filter(([, edit]) => edit.registrationId !== registrationId)
-      ) as Record<string, PendingAmountEdit>);
+      setPendingForecastEdits(previous => withoutRegistrationEdits(previous, registrationId));
+      setPendingPriceEdits(previous => withoutRegistrationEdits(previous, registrationId));
+      setPendingAmountEdits(previous => withoutRegistrationEdits(previous, registrationId));
       setFormulaMap(previous => {
         const next = new Map(previous);
         next.delete(registrationId);
