@@ -123,7 +123,7 @@ function buildForecastIndex(forecastData: ForecastValue[]) {
   });
   return index;
 }
-import { getForecastCellValue, monthKey } from './forecastCellUtils';
+import { getForecastCellValue, monthKey, resolveRegistrationPriceFormula } from './forecastCellUtils';
 import {
   forecastBodyCellClass,
   forecastFooterCellClass,
@@ -164,6 +164,7 @@ interface ScrollableMonthGridProps {
   benzeneprices: CPLPrice[];
   fixedPriceMap: Map<string, Map<string, number>>;
   onFixedPriceChange: (regId: string, month: string, price: number) => void;
+  onAmountChange: (regId: string, month: string, amount: number) => void;
   carryDetailVisibility: CarryDetailVisibility;
   forecastSummary: ForecastSummary | null;
   isForecastSummaryUpdating: boolean;
@@ -235,6 +236,7 @@ export function ScrollableMonthGrid({
   benzeneprices,
   fixedPriceMap,
   onFixedPriceChange,
+  onAmountChange,
   carryDetailVisibility,
   forecastSummary,
   isForecastSummaryUpdating,
@@ -432,12 +434,12 @@ export function ScrollableMonthGrid({
             const { value: qty } = getForecastCellValue(
               reg, m, selectedVersion, 'Qty', selectedType,
               deferredForecastData, cplPrices, forecastMode, planningView, deferredForecastIndex,
-              formulaMap.get(reg.id), naphthaprices, benzeneprices, fixedPriceMap
+              resolveRegistrationPriceFormula(formulaMap, reg), naphthaprices, benzeneprices, fixedPriceMap
             );
             const { value: price } = getForecastCellValue(
               reg, m, selectedVersion, 'Price', selectedType,
               deferredForecastData, cplPrices, forecastMode, planningView, deferredForecastIndex,
-              formulaMap.get(reg.id), naphthaprices, benzeneprices, fixedPriceMap
+              resolveRegistrationPriceFormula(formulaMap, reg), naphthaprices, benzeneprices, fixedPriceMap
             );
             totalQty += qty;
             totalAmt += qty * price;
@@ -448,7 +450,7 @@ export function ScrollableMonthGrid({
           const { value } = getForecastCellValue(
             reg, m, selectedVersion, selectedDimension, selectedType,
             deferredForecastData, cplPrices, forecastMode, planningView, deferredForecastIndex,
-            formulaMap.get(reg.id), naphthaprices, benzeneprices, fixedPriceMap
+            resolveRegistrationPriceFormula(formulaMap, reg), naphthaprices, benzeneprices, fixedPriceMap
           );
           return sum + value;
         }, 0);
@@ -677,7 +679,7 @@ export function ScrollableMonthGrid({
       forecastMode,
       planningView,
       forecastIndex,
-      formulaMap.get(reg.id),
+      resolveRegistrationPriceFormula(formulaMap, reg),
       naphthaprices,
       benzeneprices,
       fixedPriceMap,
@@ -811,7 +813,7 @@ export function ScrollableMonthGrid({
                       forecastMode,
                       planningView,
                       forecastIndex,
-                      formulaMap.get(reg.id),
+                      resolveRegistrationPriceFormula(formulaMap, reg),
                       naphthaprices,
                       benzeneprices,
                       fixedPriceMap,
@@ -854,6 +856,7 @@ export function ScrollableMonthGrid({
                               selectedDimension={selectedDimension}
                               onForecastChange={onForecastChange}
                               onFixedPriceChange={onFixedPriceChange}
+                              onAmountChange={onAmountChange}
                               onLiveValueChange={handleLiveDraftValueChange}
                             />
                           ) : (
@@ -1324,6 +1327,7 @@ const ForecastEditableCell = React.memo(function ForecastEditableCell({
   selectedDimension,
   onForecastChange,
   onFixedPriceChange,
+  onAmountChange,
   onLiveValueChange,
 }: Readonly<{
   value: number;
@@ -1333,6 +1337,7 @@ const ForecastEditableCell = React.memo(function ForecastEditableCell({
   selectedDimension: Dimension;
   onForecastChange: (regId: string, month: string, value: number) => void;
   onFixedPriceChange: (regId: string, month: string, price: number) => void;
+  onAmountChange: (regId: string, month: string, amount: number) => void;
   onLiveValueChange: (draft: LiveDraftValue) => void;
 }>) {
   const [draftValue, setDraftValue] = useState(formatEditableInputValue(value));
@@ -1364,6 +1369,8 @@ const ForecastEditableCell = React.memo(function ForecastEditableCell({
 
     if (selectedDimension === 'Price') {
       onFixedPriceChange(regId, monthKey(month), parsed);
+    } else if (selectedDimension === 'Amount') {
+      onAmountChange(regId, month, parsed);
     } else {
       onForecastChange(regId, month, parsed);
     }

@@ -166,6 +166,8 @@ export interface ForecastValue {
   version: string;
   qtyAct: number;
   qtyFcst: number;
+  priceFcst?: number;
+  amountFcst?: number;
   priceAct: number;
   amountAct?: number;
   carryInETD?: number;

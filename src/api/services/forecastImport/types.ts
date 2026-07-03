@@ -57,7 +57,7 @@ export type ConfirmLegacyImportRecord = Pick<
 
 export type ConfirmVersionedImportRecord = Pick<
   VersionedNormalizedImportRecord,
-  'excelKeyForNoRegist' | 'matchedRegistrationId' | 'period' | 'granularity' | 'qtyFcst' | 'priceFcst'
+  'excelKeyForNoRegist' | 'matchedRegistrationId' | 'period' | 'granularity' | 'qtyFcst' | 'priceFcst' | 'amountFcst'
 >;
 
 export type RegistrationMatch = {

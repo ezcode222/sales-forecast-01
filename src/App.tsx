@@ -46,7 +46,7 @@ import {
   NotificationEmailPreviewModal,
   type EmailBatchPreview,
 } from './components/notifications/NotificationEmailPreviewModal';
-import { getForecastCellValue, getForecastStoragePeriod } from './components/forecast/forecastCellUtils';
+import { getForecastCellValue, getForecastStoragePeriod, monthKey } from './components/forecast/forecastCellUtils';
 import { filterRegistrations, isColumnFilterActive } from './components/forecast/forecastFilterUtils';
 import { api, ApiError, formatApiError, type AuthUser, type SessionPermissions, type SnapshotStatus } from './lib/api';
 import { effectivePermissions } from './lib/permissions';
@@ -104,6 +104,22 @@ interface PendingForecastEdit {
   currentValue: number;
 }
 
+interface PendingPriceEdit {
+  registrationId: string;
+  period: string;
+  version: string;
+  baseValue: number;
+  currentValue: number;
+}
+
+interface PendingAmountEdit {
+  registrationId: string;
+  period: string;
+  version: string;
+  baseValue: number;
+  currentValue: number;
+}
+
 interface InventoryCommitPreviewRow {
   key: string;
   registration: Registration;
@@ -128,6 +144,43 @@ function restorePendingForecastEdits(
     restored[`${edit.registrationId}|${edit.version}|${edit.period}`] = edit;
   }
   return restored;
+}
+
+function restorePendingPriceEdits(
+  previous: Record<string, PendingPriceEdit>,
+  edits: PendingPriceEdit[]
+) {
+  const restored = { ...previous };
+  for (const edit of edits) {
+    restored[`${edit.registrationId}|${edit.version}|${edit.period}`] = edit;
+  }
+  return restored;
+}
+
+function restorePendingAmountEdits(
+  previous: Record<string, PendingAmountEdit>,
+  edits: PendingAmountEdit[]
+) {
+  const restored = { ...previous };
+  for (const edit of edits) {
+    restored[`${edit.registrationId}|${edit.version}|${edit.period}`] = edit;
+  }
+  return restored;
+}
+
+function seedPriceStateFromForecasts(forecasts: ForecastValue[]) {
+  const fixedPrices = new Map<string, Map<string, number>>();
+  const formulas = new Map<string, PriceFormula>();
+  for (const item of forecasts) {
+    const price = item.priceFcst ?? 0;
+    if (price <= 0) continue;
+    const pricingMonth = monthKey(item.month);
+    const regPrices = fixedPrices.get(item.registrationId) ?? new Map<string, number>();
+    regPrices.set(pricingMonth, price);
+    fixedPrices.set(item.registrationId, regPrices);
+    formulas.set(item.registrationId, 'Fixed Price');
+  }
+  return { fixedPrices, formulas };
 }
 
 function applyForecastSummaryEdits(
@@ -397,6 +450,8 @@ export default function App() {
   const forecastDataRef = useRef<ForecastValue[]>([]);
   const forecastPositionRef = useRef(new Map<string, number>());
   const [pendingForecastEdits, setPendingForecastEdits] = useState<Record<string, PendingForecastEdit>>({});
+  const [pendingPriceEdits, setPendingPriceEdits] = useState<Record<string, PendingPriceEdit>>({});
+  const [pendingAmountEdits, setPendingAmountEdits] = useState<Record<string, PendingAmountEdit>>({});
   const [forecastSummary, setForecastSummary] = useState<ForecastSummary | null>(null);
   const [isForecastSummaryUpdating, setIsForecastSummaryUpdating] = useState(false);
   const [forecastAuditVersion, setForecastAuditVersion] = useState(0);
@@ -437,14 +492,117 @@ export default function App() {
   }, []);
   const [fixedPriceMap, setFixedPriceMap] = useState<Map<string, Map<string, number>>>(new Map());
   const handleFixedPriceChange = useCallback((regId: string, month: string, price: number) => {
+    if (!Number.isFinite(price) || price < 0) return;
+    const pricingMonth = monthKey(month);
+    setFormulaMap(prev => new Map(prev).set(regId, 'Fixed Price'));
     setFixedPriceMap(prev => {
       const next = new Map(prev as Map<string, Map<string, number>>);
       const regPrices = new Map<string, number>(next.get(regId));
-      regPrices.set(month, price);
+      regPrices.set(pricingMonth, price);
       next.set(regId, regPrices);
       return next;
     });
-  }, []);
+
+    const storagePeriod = getForecastStoragePeriod(month, forecastMode, selectedVersion);
+    const editKey = `${regId}|${selectedVersion}|${month}`;
+    const storageKey = `${regId}|${selectedVersion}|${storagePeriod}`;
+    const knownIndex = forecastPositionRef.current.get(storageKey);
+    const existing = knownIndex === undefined
+      ? undefined
+      : forecastDataRef.current[knownIndex];
+
+    setPendingPriceEdits(previous => ({
+      ...previous,
+      [editKey]: {
+        registrationId: regId,
+        period: month,
+        version: selectedVersion,
+        baseValue: previous[editKey]?.baseValue ?? existing?.priceFcst ?? 0,
+        currentValue: price,
+      },
+    }));
+    setForecastData(prev => {
+      const indexedItem = knownIndex === undefined ? undefined : prev[knownIndex];
+      const index = indexedItem &&
+        indexedItem.registrationId === regId &&
+        indexedItem.month === storagePeriod &&
+        indexedItem.version === selectedVersion
+        ? knownIndex
+        : prev.findIndex(item =>
+            item.registrationId === regId &&
+            item.month === storagePeriod &&
+            item.version === selectedVersion
+          );
+
+      if (index > -1) {
+        const newData = [...prev];
+        newData[index] = { ...newData[index], priceFcst: price };
+        return newData;
+      }
+      forecastPositionRef.current.set(storageKey, prev.length);
+      return [...prev, {
+        registrationId: regId,
+        month: storagePeriod,
+        version: selectedVersion,
+        qtyAct: 0,
+        qtyFcst: existing?.qtyFcst ?? 0,
+        priceFcst: price,
+        priceAct: 0,
+      }];
+    });
+  }, [forecastMode, selectedVersion]);
+  const handleAmountChange = useCallback((regId: string, month: string, amount: number) => {
+    if (!Number.isFinite(amount) || amount < 0) return;
+
+    const storagePeriod = getForecastStoragePeriod(month, forecastMode, selectedVersion);
+    const editKey = `${regId}|${selectedVersion}|${month}`;
+    const storageKey = `${regId}|${selectedVersion}|${storagePeriod}`;
+    const knownIndex = forecastPositionRef.current.get(storageKey);
+    const existing = knownIndex === undefined
+      ? undefined
+      : forecastDataRef.current[knownIndex];
+
+    setPendingAmountEdits(previous => ({
+      ...previous,
+      [editKey]: {
+        registrationId: regId,
+        period: month,
+        version: selectedVersion,
+        baseValue: previous[editKey]?.baseValue ?? existing?.amountFcst ?? 0,
+        currentValue: amount,
+      },
+    }));
+    setForecastData(prev => {
+      const indexedItem = knownIndex === undefined ? undefined : prev[knownIndex];
+      const index = indexedItem &&
+        indexedItem.registrationId === regId &&
+        indexedItem.month === storagePeriod &&
+        indexedItem.version === selectedVersion
+        ? knownIndex
+        : prev.findIndex(item =>
+            item.registrationId === regId &&
+            item.month === storagePeriod &&
+            item.version === selectedVersion
+          );
+
+      if (index > -1) {
+        const newData = [...prev];
+        newData[index] = { ...newData[index], amountFcst: amount };
+        return newData;
+      }
+      forecastPositionRef.current.set(storageKey, prev.length);
+      return [...prev, {
+        registrationId: regId,
+        month: storagePeriod,
+        version: selectedVersion,
+        qtyAct: 0,
+        qtyFcst: existing?.qtyFcst ?? 0,
+        priceFcst: existing?.priceFcst ?? 0,
+        amountFcst: amount,
+        priceAct: 0,
+      }];
+    });
+  }, [forecastMode, selectedVersion]);
   const [formulaFilter, setFormulaFilter] = useState<ColumnFilterValue>(EMPTY_COLUMN_FILTER);
   const [dateRange, setDateRange] = useState({ 
     start: format(new Date(), 'yyyy-MM'), 
@@ -758,6 +916,30 @@ export default function App() {
 
       return Array.from(next.values());
     });
+
+    const { fixedPrices, formulas } = seedPriceStateFromForecasts(forecasts);
+    if (fixedPrices.size > 0) {
+      setFixedPriceMap(previous => {
+        const next = new Map(previous);
+        for (const [regId, prices] of fixedPrices) {
+          const regPrices = new Map<string, number>(previous.get(regId));
+          for (const [pricingMonth, price] of prices) {
+            regPrices.set(pricingMonth, price);
+          }
+          next.set(regId, regPrices);
+        }
+        return next;
+      });
+    }
+    if (formulas.size > 0) {
+      setFormulaMap(previous => {
+        const next = new Map(previous);
+        for (const [regId, formula] of formulas) {
+          next.set(regId, formula);
+        }
+        return next;
+      });
+    }
   }, []);
 
   useEffect(() => {
@@ -1521,6 +1703,19 @@ export default function App() {
     [pendingForecastEdits]
   );
 
+  const pendingPriceEditList = useMemo(
+    () => Object.values(pendingPriceEdits) as PendingPriceEdit[],
+    [pendingPriceEdits]
+  );
+
+  const pendingAmountEditList = useMemo(
+    () => Object.values(pendingAmountEdits) as PendingAmountEdit[],
+    [pendingAmountEdits]
+  );
+
+  const pendingCommitEditCount =
+    pendingForecastEditList.length + pendingPriceEditList.length + pendingAmountEditList.length;
+
   const inventoryCommitPreviewRows = useMemo<InventoryCommitPreviewRow[]>(() => {
     const registrationsById = new Map<string, Registration>(
       registrationsWithInventory.map(registration => [registration.id, registration])
@@ -1608,17 +1803,56 @@ export default function App() {
   }, [inventoryByMaterialKey, pendingForecastEditList, registrationsWithInventory]);
 
   const executeCommitForecastUpdates = useCallback(() => {
-    if (pendingForecastEditList.length === 0) return;
+    const qtyEditsToCommit = [...pendingForecastEditList];
+    const priceEditsToCommit = [...pendingPriceEditList];
+    const amountEditsToCommit = [...pendingAmountEditList];
+    if (
+      qtyEditsToCommit.length === 0 &&
+      priceEditsToCommit.length === 0 &&
+      amountEditsToCommit.length === 0
+    ) return;
 
-    const editsToCommit = [...pendingForecastEditList];
-    const updates: ForecastValue[] = editsToCommit.map(edit => ({
-      registrationId: edit.registrationId,
-      month: getForecastStoragePeriod(edit.period, forecastMode, edit.version),
-      version: edit.version,
-      qtyAct: 0,
-      qtyFcst: edit.currentValue,
-      priceAct: 0,
-    }));
+    const editKeys = new Set([
+      ...qtyEditsToCommit.map(edit => `${edit.registrationId}|${edit.version}|${edit.period}`),
+      ...priceEditsToCommit.map(edit => `${edit.registrationId}|${edit.version}|${edit.period}`),
+      ...amountEditsToCommit.map(edit => `${edit.registrationId}|${edit.version}|${edit.period}`),
+    ]);
+    const qtyEditsByKey = new Map(
+      qtyEditsToCommit.map(edit => [`${edit.registrationId}|${edit.version}|${edit.period}`, edit])
+    );
+    const priceEditsByKey = new Map(
+      priceEditsToCommit.map(edit => [`${edit.registrationId}|${edit.version}|${edit.period}`, edit])
+    );
+    const amountEditsByKey = new Map(
+      amountEditsToCommit.map(edit => [`${edit.registrationId}|${edit.version}|${edit.period}`, edit])
+    );
+
+    const updates: ForecastValue[] = [...editKeys].map(key => {
+      const qtyEdit = qtyEditsByKey.get(key);
+      const priceEdit = priceEditsByKey.get(key);
+      const amountEdit = amountEditsByKey.get(key);
+      const sample = qtyEdit ?? priceEdit ?? amountEdit;
+      if (!sample) {
+        throw new Error(`Missing pending edit for ${key}`);
+      }
+      const storagePeriod = getForecastStoragePeriod(sample.period, forecastMode, sample.version);
+      const storageKey = `${sample.registrationId}|${sample.version}|${storagePeriod}`;
+      const knownIndex = forecastPositionRef.current.get(storageKey);
+      const existing = knownIndex === undefined
+        ? undefined
+        : forecastDataRef.current[knownIndex];
+
+      return {
+        registrationId: sample.registrationId,
+        month: storagePeriod,
+        version: sample.version,
+        qtyAct: 0,
+        qtyFcst: qtyEdit?.currentValue ?? existing?.qtyFcst ?? 0,
+        priceFcst: priceEdit?.currentValue ?? existing?.priceFcst ?? 0,
+        amountFcst: amountEdit?.currentValue ?? existing?.amountFcst ?? 0,
+        priceAct: 0,
+      };
+    });
     const committedBy = authUser?.name || authUser?.email || 'User (Admin)';
     const currentStampPeriod = stampPeriod;
     const currentSummaryRequest = forecastSummaryRequest;
@@ -1626,9 +1860,11 @@ export default function App() {
 
     setInventoryCommitPreviewOpen(false);
     setPendingForecastEdits({});
+    setPendingPriceEdits({});
+    setPendingAmountEdits({});
     setForecastAuditVersion(version => version + 1);
     setForecastSummary(previous =>
-      applyForecastSummaryEdits(previous, editsToCommit, selectedVersion, forecastMode)
+      applyForecastSummaryEdits(previous, qtyEditsToCommit, selectedVersion, forecastMode)
     );
     loadStart();
     setTimeout(loadDone, 400);
@@ -1651,7 +1887,9 @@ export default function App() {
           setIsForecastSummaryUpdating(false);
         }
       } catch (error) {
-        setPendingForecastEdits(previous => restorePendingForecastEdits(previous, editsToCommit));
+        setPendingForecastEdits(previous => restorePendingForecastEdits(previous, qtyEditsToCommit));
+        setPendingPriceEdits(previous => restorePendingPriceEdits(previous, priceEditsToCommit));
+        setPendingAmountEdits(previous => restorePendingAmountEdits(previous, amountEditsToCommit));
         setAppError(error instanceof ApiError ? error.message : 'Failed to commit forecast updates');
       }
     };
@@ -1664,12 +1902,22 @@ export default function App() {
     loadDone,
     loadStart,
     pendingForecastEditList,
+    pendingPriceEditList,
+    pendingAmountEditList,
     selectedVersion,
     stampPeriod,
   ]);
 
   const handleCommitForecastUpdates = useCallback(() => {
-    if (pendingForecastEditList.length === 0 || isSaving) return;
+    const hasQtyEdits = pendingForecastEditList.length > 0;
+    const hasPriceEdits = pendingPriceEditList.length > 0;
+    const hasAmountEdits = pendingAmountEditList.length > 0;
+    if ((!hasQtyEdits && !hasPriceEdits && !hasAmountEdits) || isSaving) return;
+
+    if (!hasQtyEdits && (hasPriceEdits || hasAmountEdits)) {
+      executeCommitForecastUpdates();
+      return;
+    }
 
     setInventoryCommitPreviewOpen(true);
 
@@ -1684,9 +1932,12 @@ export default function App() {
       ignorePromise(loadInventoryForRegistrations(pendingRegistrations));
     }
   }, [
+    executeCommitForecastUpdates,
     isSaving,
     loadInventoryForRegistrations,
     pendingForecastEditList,
+    pendingPriceEditList,
+    pendingAmountEditList,
     registrationsWithInventory,
   ]);
 
@@ -1828,6 +2079,14 @@ export default function App() {
         (Object.entries(previous) as Array<[string, PendingForecastEdit]>)
           .filter(([, edit]) => edit.registrationId !== registrationId)
       ) as Record<string, PendingForecastEdit>);
+      setPendingPriceEdits(previous => Object.fromEntries(
+        (Object.entries(previous) as Array<[string, PendingPriceEdit]>)
+          .filter(([, edit]) => edit.registrationId !== registrationId)
+      ) as Record<string, PendingPriceEdit>);
+      setPendingAmountEdits(previous => Object.fromEntries(
+        (Object.entries(previous) as Array<[string, PendingAmountEdit]>)
+          .filter(([, edit]) => edit.registrationId !== registrationId)
+      ) as Record<string, PendingAmountEdit>);
       setFormulaMap(previous => {
         const next = new Map(previous);
         next.delete(registrationId);
@@ -1895,6 +2154,9 @@ export default function App() {
         actuals,
         versions.length > 0 ? versions : [targetVersion]
       );
+      setPendingForecastEdits({});
+      setPendingPriceEdits({});
+      setPendingAmountEdits({});
       setForecastSummary(null);
       setForecastAuditVersion(version => version + 1);
     } finally {
@@ -2793,6 +3055,7 @@ export default function App() {
                   benzeneprices={benzeneprices}
                   fixedPriceMap={fixedPriceMap}
                   onFixedPriceChange={handleFixedPriceChange}
+                  onAmountChange={handleAmountChange}
                   isTableDataLoading={isTableDataLoading}
                   isLoadingMore={isLoadingMore}
                   hasMoreRows={hasMoreRegistrations}
@@ -2866,10 +3129,10 @@ export default function App() {
                     </button>
                   </div>
                   <div className="flex items-center gap-4">
-                    <span className="text-[10px] text-slate-400 font-serif italic">Pending Changes: {pendingForecastEditList.length} units</span>
+                    <span className="text-[10px] text-slate-400 font-serif italic">Pending Changes: {pendingCommitEditCount} units</span>
                     <button 
                       onClick={handleCommitForecastUpdates}
-                      disabled={isSaving || pendingForecastEditList.length === 0}
+                      disabled={isSaving || pendingCommitEditCount === 0}
                       className="bg-green-600 hover:bg-green-700 text-white text-[10px] font-bold px-4 py-1.5 rounded shadow-sm hover:shadow-md transition-all active:scale-95 uppercase tracking-wider disabled:opacity-50"
                     >
                       Commit Updates

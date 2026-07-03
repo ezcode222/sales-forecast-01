@@ -70,6 +70,7 @@ interface NormalizedForecastUpdate {
   granularity: string;
   qtyFcst: number;
   priceFcst: number;
+  amountFcst: number;
 }
 
 const summaryCache = new Map<
@@ -125,6 +126,7 @@ function normalizeForecastUpdates(updates: unknown[]) {
     const granularity = normalizeGranularity(item.granularity);
     const qtyFcst = Number(item.qtyFcst ?? 0);
     const priceFcst = Number(item.priceFcst ?? 0);
+    const amountFcst = Number(item.amountFcst ?? 0);
     if (!Number.isFinite(qtyFcst) || qtyFcst < 0) continue;
     normalized.set(`${registrationId}|${versionName}|${periodKey}`, {
       registrationId,
@@ -134,6 +136,7 @@ function normalizeForecastUpdates(updates: unknown[]) {
       granularity,
       qtyFcst,
       priceFcst: Number.isFinite(priceFcst) ? priceFcst : 0,
+      amountFcst: Number.isFinite(amountFcst) && amountFcst >= 0 ? amountFcst : 0,
     });
   }
   return [...normalized.values()];
@@ -145,13 +148,14 @@ function normalizeStampPeriod(value: unknown) {
 }
 
 function hasForecastChanged(
-  oldValue: { qtyFcst: unknown; priceFcst: unknown } | undefined,
+  oldValue: { qtyFcst: unknown; priceFcst: unknown; amountFcst?: unknown } | undefined,
   update: NormalizedForecastUpdate
 ) {
   if (!oldValue) return true;
   return (
     Math.abs(Number(oldValue.qtyFcst ?? 0) - update.qtyFcst) > 0.0001 ||
-    Math.abs(Number(oldValue.priceFcst ?? 0) - update.priceFcst) > 0.0001
+    Math.abs(Number(oldValue.priceFcst ?? 0) - update.priceFcst) > 0.0001 ||
+    Math.abs(Number(oldValue.amountFcst ?? 0) - update.amountFcst) > 0.0001
   );
 }
 
@@ -170,6 +174,8 @@ function mapAuditRow(row: Prisma.ForecastChangeLogGetPayload<{ include: { batch:
     newQtyFcst: Number(row.newQtyFcst),
     oldPriceFcst: row.oldPriceFcst === null ? null : Number(row.oldPriceFcst),
     newPriceFcst: Number(row.newPriceFcst),
+    oldAmountFcst: row.oldAmountFcst === null ? null : Number(row.oldAmountFcst),
+    newAmountFcst: Number(row.newAmountFcst),
     changedAt: row.changedAt,
   };
 }
@@ -826,6 +832,7 @@ router.get('/', async (req, res) => {
       version:        r.versionName,
       qtyFcst:        Number(r.qtyFcst),
       priceFcst:      Number(r.priceFcst),
+      amountFcst:     Number(r.amountFcst),
     })));
   } catch (error) {
     console.error('[forecast] GET error:', error);
@@ -835,7 +842,7 @@ router.get('/', async (req, res) => {
 
 /**
  * PATCH /api/forecast
- * Body: Array<{ registrationId, version, period, granularity, qtyFcst, priceFcst }>
+ * Body: Array<{ registrationId, version, period, granularity, qtyFcst, priceFcst, amountFcst }>
  * Upserts all rows in a single transaction.
  */
 router.patch('/', async (req, res) => {
@@ -857,6 +864,10 @@ router.patch('/', async (req, res) => {
     const qtyFcst = Number((value as Record<string, unknown>).qtyFcst);
     if (Number.isFinite(qtyFcst) && qtyFcst < 0) {
       return res.status(400).json({ error: 'Forecast quantity cannot be negative.' });
+    }
+    const amountFcst = Number((value as Record<string, unknown>).amountFcst);
+    if (Number.isFinite(amountFcst) && amountFcst < 0) {
+      return res.status(400).json({ error: 'Forecast amount cannot be negative.' });
     }
   }
   const normalizedUpdates = normalizeForecastUpdates(updates);
@@ -888,6 +899,7 @@ router.patch('/', async (req, res) => {
           granularity: true,
           qtyFcst: true,
           priceFcst: true,
+          amountFcst: true,
         },
       });
       const existingMap = new Map(
@@ -929,6 +941,7 @@ router.patch('/', async (req, res) => {
             granularity: update.granularity,
             qtyFcst: update.qtyFcst,
             priceFcst: update.priceFcst,
+            amountFcst: update.amountFcst,
             ...(changed ? { lastBatchId: batch.id } : {}),
           },
           create: {
@@ -938,6 +951,7 @@ router.patch('/', async (req, res) => {
             granularity: update.granularity,
             qtyFcst: update.qtyFcst,
             priceFcst: update.priceFcst,
+            amountFcst: update.amountFcst,
             lastBatchId: batch.id,
           },
         });
@@ -957,6 +971,8 @@ router.patch('/', async (req, res) => {
               newQtyFcst: update.qtyFcst,
               oldPriceFcst: oldValue?.priceFcst ?? null,
               newPriceFcst: update.priceFcst,
+              oldAmountFcst: oldValue?.amountFcst ?? null,
+              newAmountFcst: update.amountFcst,
             };
           }),
         });

@@ -4,6 +4,7 @@ import {
   firstWednesdayPeriod,
   isMonthPeriodKey,
 } from '../../lib/forecastPeriod';
+import { PRICE_FORMULA_OPTIONS } from '../../types/forecast';
 
 const isDailyKey = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
 const isWeekRangeKey = (value: string) => /^\d{4}-\d{2}-\d{2}\|\d{4}-\d{2}-\d{2}$/.test(value);
@@ -12,6 +13,16 @@ export const monthKey = (value: string) => {
   if (isWeekRangeKey(value)) return value.split('|')[0].slice(0, 7);
   return value;
 };
+
+export function resolveRegistrationPriceFormula(
+  formulaMap: Map<string, PriceFormula>,
+  registration: Registration
+): PriceFormula {
+  const mapped = formulaMap.get(registration.id);
+  if (mapped) return mapped;
+  const fromRegistration = registration.priceFormula as PriceFormula;
+  return PRICE_FORMULA_OPTIONS.includes(fromRegistration) ? fromRegistration : 'CPL';
+}
 
 export function getForecastStoragePeriod(
   displayPeriod: string,
@@ -102,6 +113,8 @@ export function getForecastCellValue(
   const priceAct = actualItem?.priceAct ?? 0;
   let hasAggregatedDailyData = false;
 
+  let storedPriceFcst: number | undefined;
+  let storedAmountFcst: number | undefined;
   if (forecastMode === 'month' && isMonthPeriodKey(month)) {
     const storagePeriod = getForecastStoragePeriod(month, forecastMode, selectedVersion);
     const storedItem = forecastIndex
@@ -109,7 +122,11 @@ export function getForecastCellValue(
       : forecastData.find(
           f => f.registrationId === reg.id && f.version === selectedVersion && f.month === storagePeriod
         );
-    if (storedItem) qtyFcst = storedItem.qtyFcst;
+    if (storedItem) {
+      qtyFcst = storedItem.qtyFcst;
+      storedPriceFcst = storedItem.priceFcst;
+      storedAmountFcst = storedItem.amountFcst;
+    }
   } else if (forecastMode === 'week' && isWeekRangeKey(month)) {
     const [rangeStart, rangeEnd] = month.split('|');
     const dailyItems = forecastData.filter(
@@ -133,14 +150,22 @@ export function getForecastCellValue(
   const naphtha = priceMaps?.naphtha.get(pricingMonth) ?? (naphthaprices ?? []).find(c => c.month === pricingMonth)?.price ?? 0;
   const benzene = priceMaps?.benzene.get(pricingMonth) ?? (benzeneprices ?? []).find(c => c.month === pricingMonth)?.price ?? 0;
 
+  const pendingFixedPrice = fixedPriceMap?.get(reg.id)?.get(pricingMonth);
+  const storedFixedPrice =
+    pendingFixedPrice ??
+    (storedPriceFcst != null && storedPriceFcst > 0 ? storedPriceFcst : undefined) ??
+    (activeItem?.priceFcst != null && activeItem.priceFcst > 0 ? activeItem.priceFcst : undefined);
+
   let priceFcst: number;
   const resolvedFormula = formula ?? 'CPL';
-  if (resolvedFormula === 'Naphtha') {
+  if (storedFixedPrice != null) {
+    priceFcst = storedFixedPrice;
+  } else if (resolvedFormula === 'Naphtha') {
     priceFcst = naphtha;
   } else if (resolvedFormula === 'Benzene') {
     priceFcst = benzene;
   } else if (resolvedFormula === 'Fixed Price') {
-    priceFcst = fixedPriceMap?.get(reg.id)?.get(pricingMonth) ?? (cpl + reg.spread);
+    priceFcst = cpl + reg.spread;
   } else {
     priceFcst = cpl + reg.spread;
   }
@@ -190,16 +215,24 @@ export function getForecastCellValue(
     if (selectedType === 'Act') value = priceAct;
     else if (selectedType === 'Fcst') {
       value = priceFcst;
-      if (resolvedFormula === 'Fixed Price') isEditable = true;
+      if (forecastMode === 'month') isEditable = true;
     }
     else value = priceAct - priceFcst;
   } else {
     const amtAct = planningView === 'sale'
       ? baseAmountAct
       : baseAmountAct + (actValue - baseActValue) * priceAct;
-    const amtFcst = fcstValue * priceFcst;
+    const calculatedAmtFcst = fcstValue * priceFcst;
+    const storedAmtFcst =
+      storedAmountFcst != null && storedAmountFcst > 0
+        ? storedAmountFcst
+        : (activeItem?.amountFcst != null && activeItem.amountFcst > 0 ? activeItem.amountFcst : undefined);
+    const amtFcst = storedAmtFcst ?? calculatedAmtFcst;
     if (selectedType === 'Act') value = amtAct;
-    else if (selectedType === 'Fcst') value = amtFcst;
+    else if (selectedType === 'Fcst') {
+      value = amtFcst;
+      if (forecastMode === 'month') isEditable = true;
+    }
     else value = amtAct - amtFcst;
   }
 
