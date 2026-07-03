@@ -152,7 +152,7 @@ export function FixedColumnsTable({
                     >
                       <div className={cn(forecastBodyCellClass, 'px-1.5')}>
                         <select
-                          value={formulaMap.get(reg.id) ?? 'CPL'}
+                          value={formulaMap.get(reg.id) ?? (PRICE_FORMULA_OPTIONS.includes(reg.priceFormula as PriceFormula) ? reg.priceFormula : 'CPL')}
                           onChange={e => onFormulaChange(reg.id, e.target.value as PriceFormula)}
                           className="sf-select w-full text-[10px] border rounded px-1 py-0.5 outline-none cursor-pointer appearance-none leading-tight"
                         >

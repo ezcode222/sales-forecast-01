@@ -168,6 +168,7 @@ function toConfirmRecords(records: VersionedNormalizedImportRecord[]): ConfirmVe
     granularity: record.granularity,
     qtyFcst: record.qtyFcst,
     priceFcst: record.priceFcst,
+    amountFcst: record.amountFcst,
   }));
 }
 
@@ -193,6 +194,7 @@ async function loadExistingForecastRows(
         period: true,
         qtyFcst: true,
         priceFcst: true,
+        amountFcst: true,
         granularity: true,
       },
     });
@@ -384,6 +386,7 @@ export async function buildVersionedImportPreview(
           action: existing ? 'overwrite' as const : 'create' as const,
           oldQtyFcst: existing ? Number(existing.qtyFcst) : null,
           oldPriceFcst: existing ? Number(existing.priceFcst) : null,
+          oldAmountFcst: existing ? Number(existing.amountFcst) : null,
         };
       });
 

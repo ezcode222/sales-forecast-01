@@ -64,6 +64,7 @@ export interface ForecastInputTableProps {
   benzeneprices: CPLPrice[];
   fixedPriceMap: Map<string, Map<string, number>>;
   onFixedPriceChange: (regId: string, month: string, price: number) => void;
+  onAmountChange: (regId: string, month: string, amount: number) => void;
   isTableDataLoading: boolean;
   isLoadingMore: boolean;
   hasMoreRows: boolean;
@@ -107,6 +108,7 @@ function ForecastInputTableComponent({
   benzeneprices,
   fixedPriceMap,
   onFixedPriceChange,
+  onAmountChange,
   isTableDataLoading,
   isLoadingMore,
   hasMoreRows,
@@ -459,6 +461,7 @@ function ForecastInputTableComponent({
             benzeneprices={benzeneprices}
             fixedPriceMap={fixedPriceMap}
             onFixedPriceChange={onFixedPriceChange}
+            onAmountChange={onAmountChange}
             carryDetailVisibility={carryDetailVisibility}
             forecastSummary={forecastSummary}
             isForecastSummaryUpdating={isForecastSummaryUpdating}
@@ -635,19 +638,19 @@ function ImportPreviewModal({
   const confirmReadyText = getImportConfirmReadyText(preview, isVersioned);
 
   return createPortal(
-    <div className="fixed inset-0 z-[70] overflow-hidden">
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 sm:p-6">
       <button
         type="button"
         className="absolute inset-0 bg-slate-900/65 backdrop-blur-md"
         onClick={onClose}
         aria-label="Close import preview"
       />
-      <div className="relative flex h-full items-center justify-center p-4 sm:p-6">
-      <dialog
-        open
+      <div
+        role="dialog"
+        aria-modal="true"
         aria-labelledby="import-preview-title"
-        className="m-0 flex h-[min(92dvh,920px)] max-h-[min(92dvh,920px)] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-slate-300 bg-white p-0 shadow-[0_24px_80px_rgba(15,23,42,0.28)]"
-        onClick={e => e.stopPropagation()}
+        className="relative flex h-[min(92dvh,920px)] max-h-[min(92dvh,920px)] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-slate-300 bg-white shadow-[0_24px_80px_rgba(15,23,42,0.28)]"
+        onMouseDown={event => event.stopPropagation()}
       >
         <div className="shrink-0 bg-[#003d6b] px-6 py-4 text-white">
           <div className="flex items-start justify-between gap-4">
@@ -1191,7 +1194,6 @@ function ImportPreviewModal({
             </button>
           </div>
         </div>
-      </dialog>
       </div>
     </div>,
     document.body

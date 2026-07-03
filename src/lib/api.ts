@@ -186,6 +186,7 @@ export interface VersionedForecastImportRecord {
   action: 'create' | 'overwrite';
   oldQtyFcst: number | null;
   oldPriceFcst?: number | null;
+  oldAmountFcst?: number | null;
 }
 
 export interface AmountMismatchWarning {
@@ -407,6 +408,8 @@ export interface ForecastAuditChange {
   newQtyFcst: number;
   oldPriceFcst: number | null;
   newPriceFcst: number;
+  oldAmountFcst: number | null;
+  newAmountFcst: number;
   changedAt: string;
 }
 
@@ -569,7 +572,7 @@ export const api = {
       if (params.endPeriod)   qs.set('endPeriod',   params.endPeriod);
       if (params.granularity) qs.set('granularity', params.granularity);
       params.registrationIds?.forEach(id => qs.append('registrationId', id));
-      return request<{ registrationId: string; period: string; version: string; qtyFcst: number; priceFcst: number }[]>(
+      return request<{ registrationId: string; period: string; version: string; qtyFcst: number; priceFcst: number; amountFcst: number }[]>(
         `/api/forecast?${qs.toString()}`,
         { signal: params.signal }
       ).then(rows => rows.map(r => ({
@@ -578,6 +581,8 @@ export const api = {
         version:        r.version,
         qtyAct:         0,            // filled in from actuals merge
         qtyFcst:        r.qtyFcst,
+        priceFcst:      r.priceFcst,
+        amountFcst:     r.amountFcst,
         priceAct:       0,            // filled in from actuals merge
       })));
     },
@@ -598,7 +603,8 @@ export const api = {
           period:         v.month,    // map month → period for server
             granularity:    /^\d{4}-\d{2}-\d{2}$/.test(v.month) ? 'week' : 'month',
             qtyFcst:        v.qtyFcst,
-            priceFcst:      0,
+            priceFcst:      v.priceFcst ?? 0,
+            amountFcst:     v.amountFcst ?? 0,
           })),
         }),
       }),
