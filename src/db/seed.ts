@@ -51,6 +51,28 @@ async function seed() {
   }
   console.log(`[seed] Upserted ${INITIAL_CPL_PRICES.length} CPL prices`);
 
+  await prisma.overplanConfig.upsert({
+    where: { id: 'default' },
+    update: {},
+    create: { id: 'default' },
+  });
+
+  const recipientSeed = [
+    { reportType: 'aggregate', email: 'taksaporn@ube.co.th', displayName: 'Taksaporn Poldongnok', sortOrder: 0 },
+    { reportType: 'non_aggregate', email: 'taksaporn@ube.co.th', displayName: 'Taksaporn Poldongnok', sortOrder: 0 },
+    { reportType: 'forecast_change', email: 'taksaporn@ube.co.th', displayName: 'Taksaporn Poldongnok', sortOrder: 0 },
+  ] as const;
+
+  for (const recipient of recipientSeed) {
+    const existing = await prisma.overplanRecipient.findFirst({
+      where: { reportType: recipient.reportType, email: recipient.email },
+    });
+    if (!existing) {
+      await prisma.overplanRecipient.create({ data: recipient });
+    }
+  }
+  console.log('[seed] Ensured overplan config and recipients');
+
   console.log('[seed] Done.');
   await prisma.$disconnect();
 }

@@ -9,8 +9,15 @@ import versionsRouter from './api/routes/versions';
 import actualsRouter from './api/routes/actuals';
 import inventoryRouter from './api/routes/inventory';
 import currentForecastImportRouter from './api/routes/currentForecastImport';
+import forecastImportRouter from './api/routes/forecastImport';
 import syncRouter from './api/routes/sync';
+import overplanRouter from './api/routes/overplan';
+import forecastEmailRouter, { createEmployeeRouter } from './api/routes/forecastEmail';
+import appAdminRouter from './api/routes/appAdmin';
 import { startSnapshotScheduler } from './api/services/dataSnapshot';
+import { startOverplanScheduler } from './api/services/overplanWarmup';
+import { ensureHrEmployeeCache } from './api/services/employeeEmail';
+import { ensureRoleDefaults } from './api/services/appRoles';
 import { createAuthRouter, getAppPath, normalizeBasePath, requireAuth } from './api/auth';
 
 const app = express();
@@ -32,7 +39,12 @@ apiRouter.use('/versions', versionsRouter);
 apiRouter.use('/actuals', actualsRouter);
 apiRouter.use('/inventory', inventoryRouter);
 apiRouter.use('/import', currentForecastImportRouter);
+apiRouter.use('/import', forecastImportRouter);
 apiRouter.use('/sync', syncRouter);
+apiRouter.use('/overplan', overplanRouter);
+apiRouter.use('/forecast-email', forecastEmailRouter);
+apiRouter.use('/admin', appAdminRouter);
+apiRouter.use('/employees', createEmployeeRouter());
 
 app.use(`${basePath}/auth`, createAuthRouter());
 app.use(`${basePath}/api`, requireAuth, apiRouter);
@@ -59,4 +71,6 @@ app.get(`${basePath}/*`, (_req, res) => {
 app.listen(PORT, () => {
   console.log(`[server] listening on http://localhost:${PORT}${basePath || ''}`);
   startSnapshotScheduler();
+  startOverplanScheduler();
+  void ensureHrEmployeeCache().then(() => ensureRoleDefaults());
 });

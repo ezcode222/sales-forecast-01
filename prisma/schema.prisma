@@ -166,3 +166,90 @@ model DataSnapshotState {
 
   @@map("data_snapshot_state")
 }
+
+model OverplanConfig {
+  id                    String   @id @default("default") @db.NVarChar(20)
+  planVersionName       String   @default("BB FY26") @db.NVarChar(100)
+  actualVsPlanEnabled   Boolean  @default(true)
+  forecastVsPlanEnabled Boolean  @default(false)
+  compareLeft           String   @default("Actual") @db.NVarChar(100)
+  compareRight          String   @default("Current Forecast") @db.NVarChar(100)
+  aboveEnabled          Boolean  @default(true)
+  belowEnabled          Boolean  @default(true)
+  aboveThresholdTon     Decimal? @db.Decimal(18, 4)
+  aboveThresholdPercent Decimal? @db.Decimal(8, 4)
+  belowThresholdTon     Decimal? @db.Decimal(18, 4)
+  belowThresholdPercent Decimal? @db.Decimal(8, 4)
+  updatedBy             String   @default("system") @db.NVarChar(100)
+  updatedAt             DateTime @default(now()) @updatedAt
+
+  @@map("overplan_config")
+}
+
+model OverplanRecipient {
+  id          String  @id @default(uuid()) @db.NVarChar(36)
+  reportType  String  @db.NVarChar(30)
+  email       String  @db.NVarChar(320)
+  displayName String? @db.NVarChar(200)
+  isActive    Boolean @default(true)
+  sortOrder   Int     @default(0)
+
+  @@index([reportType, isActive])
+  @@map("overplan_recipients")
+}
+
+/// Local snapshot of dbo.vwHR_SC_Employee for fast employee search and email lookup.
+model HrEmployeeCache {
+  empCode       String   @id @db.NVarChar(50)
+  fullNameEng   String   @default("") @db.NVarChar(200)
+  currentEmail  String   @default("") @db.NVarChar(320)
+  costCenterEng String   @default("") @db.NVarChar(300)
+  adLoginName   String   @default("") @db.NVarChar(200)
+  syncedAt      DateTime @default(now()) @updatedAt
+
+  @@index([fullNameEng])
+  @@index([costCenterEng])
+  @@map("hr_employee_cache")
+}
+
+/// Global CC list (not bound to owner) for forecast change emails.
+model ForecastCcRecipient {
+  id            String  @id @default(uuid()) @db.NVarChar(36)
+  empCode       String  @unique @db.NVarChar(50)
+  fullNameEng   String  @default("") @db.NVarChar(200)
+  currentEmail  String  @default("") @db.NVarChar(320)
+  notifyEnabled Boolean @default(false)
+  source        String  @default("manual") @db.NVarChar(20)
+  sortOrder     Int     @default(0)
+
+  @@map("forecast_cc_recipients")
+}
+
+/// Audit of forecast change emails actually sent (per recipient).
+model ForecastNotificationSendLog {
+  id            String   @id @default(uuid()) @db.NVarChar(36)
+  empCode       String?  @db.NVarChar(50)
+  email         String   @db.NVarChar(320)
+  recipientKind String   @db.NVarChar(20)
+  ownerName     String?  @db.NVarChar(200)
+  commitBatchId String?  @db.NVarChar(36)
+  sentAt        DateTime @default(now())
+
+  @@index([email])
+  @@index([commitBatchId])
+  @@map("forecast_notification_send_log")
+}
+
+/// App roles for Manage Admin / Manage Email access (keyed by empCode).
+model AppUserRole {
+  empCode      String   @id @db.NVarChar(50)
+  fullNameEng  String   @default("") @db.NVarChar(200)
+  currentEmail String   @default("") @db.NVarChar(320)
+  role         String   @db.NVarChar(20)
+  assignedBy   String?  @db.NVarChar(200)
+  source       String   @default("manual") @db.NVarChar(20)
+  assignedAt   DateTime @default(now())
+
+  @@index([role])
+  @@map("app_user_roles")
+}

@@ -40,6 +40,35 @@ export function monthKeyToEndOfMonth(monthKey: string): Date {
   return new Date(Date.UTC(y, m, 0));
 }
 
+export const CURRENT_FORECAST_VERSION_NAME = 'Current Forecast';
+
+/** First Wednesday on or after the 1st — matches legacy Excel import storage. */
+export function firstWednesdayPeriod(month: string): string {
+  const [yearText, monthText] = month.split('-');
+  const year = Number(yearText);
+  const monthIndex = Number(monthText) - 1;
+  const firstDay = new Date(Date.UTC(year, monthIndex, 1));
+  const daysUntilWednesday = (3 - firstDay.getUTCDay() + 7) % 7;
+  return new Date(Date.UTC(year, monthIndex, 1 + daysUntilWednesday))
+    .toISOString()
+    .slice(0, 10);
+}
+
+export function resolveForecastStoragePeriod(
+  displayPeriod: string,
+  forecastMode: 'month' | 'week' | 'day',
+  versionName: string,
+  currentForecastVersion = CURRENT_FORECAST_VERSION_NAME
+): string {
+  if (forecastMode !== 'month' || !MONTH_KEY_RE.test(displayPeriod)) {
+    return displayPeriod;
+  }
+  if (versionName === currentForecastVersion) {
+    return firstWednesdayPeriod(displayPeriod);
+  }
+  return displayPeriod;
+}
+
 export function toPeriodDate(value: Date | string, granularity = 'month'): Date {
   if (value instanceof Date) return value;
   return parseForecastPeriodToDate(value, granularity);

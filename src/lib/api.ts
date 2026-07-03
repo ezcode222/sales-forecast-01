@@ -52,6 +52,7 @@ export interface CurrentForecastImportPreview {
   previewContractVersion: number;
   summary: {
     sheetName: string;
+    sheetNames?: string[];
     version: 'Current Forecast';
     totalRows: number;
     validRows: number;
@@ -62,6 +63,7 @@ export interface CurrentForecastImportPreview {
     unmatchedRows: number;
     duplicateExcelKeys: number;
     duplicateRegistrationMatches: number;
+    crossSheetDuplicateKeys?: number;
     invalidNumericValues: number;
     existingDbConflicts: number;
     matchedRows: number;
@@ -72,6 +74,7 @@ export interface CurrentForecastImportPreview {
     groupedDuplicateKeys: number;
     createRecords: number;
     overwriteRecords: number;
+    skippedKeyGroups?: number;
   };
   expectedForecastColumns: Array<{
     col: string;
@@ -81,21 +84,55 @@ export interface CurrentForecastImportPreview {
     period: string;
   }>;
   detectedHeaders: Array<{ index: number; name: string }>;
-  headerErrors: Array<{ column: string; expected: string; actual: string }>;
-  missingKeyRows: Array<{ sourceRow: number }>;
-  duplicateExcelKeys: Array<{ excelKeyForNoRegist: string; sourceRows: number[] }>;
-  unmatchedRows: Array<{ sourceRow: number; excelKeyForNoRegist: string }>;
+  headerErrors: Array<{ sourceSheet?: string; column: string; expected: string; actual: string }>;
+  missingKeyRows: Array<{ sourceSheet?: string; sourceRow: number }>;
+  duplicateExcelKeys: Array<{
+    excelKeyForNoRegist: string;
+    sourceRows: number[];
+    sourceSheet?: string;
+    entries?: Array<{ sourceSheet: string; sourceRow: number }>;
+  }>;
+  crossSheetDuplicateKeys?: Array<{
+    excelKeyForNoRegist: string;
+    entries: Array<{ sourceSheet: string; sourceRow: number }>;
+  }>;
+  unmatchedRows: Array<{
+    sourceSheet?: string;
+    sourceRow: number;
+    excelKeyForNoRegist: string;
+    reasonCode: string;
+    reason: string;
+    hint?: string;
+    parsedKey?: {
+      soldTo: string;
+      shipTo: string;
+      enduser: string;
+      plant: string;
+      material: string;
+      onOff: string;
+    };
+  }>;
   duplicateRegistrationMatches: Array<{
+    sourceSheet?: string;
     sourceRow: number;
     excelKeyForNoRegist: string;
     matchedRegistrationIds: string[];
   }>;
   invalidNumericValues: Array<{
+    sourceSheet?: string;
     sourceRow: number;
     excelKeyForNoRegist: string;
     column: string;
     header: string;
     value: unknown;
+    reason?: string;
+  }>;
+  skippedKeyGroups?: Array<{
+    excelKeyForNoRegist: string;
+    sourceRows: number[];
+    sourceSheet?: string;
+    reason: string;
+    reasonCode: 'invalid_forecast_number';
   }>;
   existingDbConflicts: Array<{
     sourceRow: number;
@@ -122,7 +159,197 @@ export interface CurrentForecastImportResult {
   imported: number;
   created: number;
   overwritten: number;
-  version: 'Current Forecast';
+  version: string;
+}
+
+export interface VersionedExpectedColumn {
+  month: string;
+  period: string;
+  qty: { col: string; index: number; header: string };
+  price: { col: string; index: number; header: string };
+  amount: { col: string; index: number; header: string };
+}
+
+export interface VersionedForecastImportRecord {
+  sourceRow: number;
+  excelKeyForNoRegist: string;
+  matchedRegistrationId: string;
+  version: string;
+  sourceColumn: string;
+  sourceMonthHeader: string;
+  forecastMonth: string;
+  period: string;
+  granularity: 'month';
+  qtyFcst: number;
+  priceFcst: number;
+  amountFcst: number;
+  action: 'create' | 'overwrite';
+  oldQtyFcst: number | null;
+  oldPriceFcst?: number | null;
+}
+
+export interface AmountMismatchWarning {
+  sourceSheet: string;
+  sourceRow: number;
+  excelKeyForNoRegist: string;
+  forecastMonth: string;
+  qtyFcst: number;
+  priceFcst: number;
+  amountFcst: number;
+  expectedAmount: number;
+  difference: number;
+}
+
+export type LegacyForecastImportPreview = CurrentForecastImportPreview & {
+  importMode: 'current_forecast';
+  previewId: string;
+};
+
+export type VersionedForecastImportPreview = Omit<
+  CurrentForecastImportPreview,
+  'expectedForecastColumns' | 'summary' | 'importableRecords'
+> & {
+  previewId: string;
+  importMode: 'versioned';
+  targetVersion: string;
+  excelVersionLabel: string;
+  versionExists: boolean;
+  expectedColumns: VersionedExpectedColumn[];
+  amountMismatchWarnings: AmountMismatchWarning[];
+  summary: CurrentForecastImportPreview['summary'] & {
+    version: string;
+    amountMismatchWarnings?: number;
+  };
+  importableRecords: VersionedForecastImportRecord[];
+};
+
+export type ForecastImportPreview = LegacyForecastImportPreview | VersionedForecastImportPreview;
+
+export type ForecastImportResult = CurrentForecastImportResult;
+
+export function isVersionedImportPreview(
+  preview: ForecastImportPreview
+): preview is VersionedForecastImportPreview {
+  if (preview.importMode === 'versioned') return true;
+  return 'expectedColumns' in preview && Array.isArray(preview.expectedColumns) && 'previewId' in preview;
+}
+
+export const LEGACY_FORECAST_IMPORT_CONTRACT_VERSION = 8;
+export const VERSIONED_FORECAST_IMPORT_CONTRACT_VERSION = 1;
+
+export interface OverplanConfig {
+  id: string;
+  planVersionName: string;
+  actualVsPlanEnabled: boolean;
+  forecastVsPlanEnabled: boolean;
+  compareLeft: string;
+  compareRight: string;
+  aboveEnabled: boolean;
+  belowEnabled: boolean;
+  aboveThresholdTon: number | null;
+  aboveThresholdPercent: number | null;
+  belowThresholdTon: number | null;
+  belowThresholdPercent: number | null;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export interface OverplanRecipient {
+  id: string;
+  reportType: 'aggregate' | 'non_aggregate' | 'forecast_change';
+  email: string;
+  displayName: string | null;
+  isActive: boolean;
+  sortOrder: number;
+}
+
+export interface EmailRecipientPreview {
+  email: string;
+  displayName: string;
+  source: 'owner' | 'distribution';
+}
+
+export interface EmailBatchPreview {
+  id: string;
+  reportType: 'aggregate' | 'non_aggregate' | 'forecast_change';
+  title: string;
+  subject: string;
+  html: string;
+  recipients: EmailRecipientPreview[];
+  rowCount: number;
+  previewOnly: true;
+}
+
+export interface EmployeeContact {
+  empCode: string;
+  fullNameEng: string;
+  currentEmail: string;
+  costCenterEng: string;
+}
+
+export interface ForecastCcRecipient {
+  id: string;
+  empCode: string;
+  fullNameEng: string;
+  currentEmail: string;
+  notifyEnabled: boolean;
+  source: string;
+  sortOrder: number;
+}
+
+export interface ForecastEmailOwner {
+  ownerName: string;
+  fullNameEng: string;
+  currentEmail: string;
+  hasEmail: boolean;
+  routedToFallback?: boolean;
+  notifyDisplayName?: string;
+}
+
+export interface OverplanResultRow {
+  materialCode: string;
+  materialDescription: string;
+  plantCode: string;
+  period: string;
+  leftQty: number;
+  rightQty: number;
+  diffQty: number;
+  pctVsRight: number | null;
+  status: 'over' | 'under' | 'ok';
+  breachReasons: string[];
+  ownerName?: string;
+  registrationId?: string;
+}
+
+export interface OverplanEvaluateResponse {
+  generatedAt: string;
+  view: 'aggregate' | 'detail';
+  compareLeft: string;
+  compareRight: string;
+  page: number;
+  pageSize: number;
+  totalRows: number;
+  hasMore: boolean;
+  breachOnly: boolean;
+  summary: {
+    overCount: number;
+    underCount: number;
+  };
+  rows: OverplanResultRow[];
+}
+
+export interface OverplanEvaluateRequest {
+  startMonth: string;
+  endMonth: string;
+  granularity?: 'month' | 'week';
+  compareLeft?: string;
+  compareRight?: string;
+  view: 'aggregate' | 'detail';
+  breachOnly?: boolean;
+  status?: 'over' | 'under';
+  page?: number;
+  pageSize?: number;
+  filters?: Record<string, string[]>;
 }
 
 export class ApiError extends Error {
@@ -134,6 +361,14 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+export function formatApiError(error: unknown, fallback: string): string {
+  if (!(error instanceof ApiError)) return fallback;
+  if (error.status === 404) {
+    return 'API endpoint not found — restart API server (npm run server) or deploy the latest backend.';
+  }
+  return error.message || fallback;
 }
 
 export interface RegistrationPage {
@@ -183,16 +418,37 @@ export interface ForecastCellAuditSummary {
 export interface AuthUser {
   name: string;
   email: string;
+  loginName?: string;
+}
+
+export type AppRole = 'admin' | 'super_user' | 'user';
+
+export interface SessionPermissions {
+  role: AppRole;
+  canManageAdmin: boolean;
+  canManageEmail: boolean;
+  empCode: string | null;
 }
 
 export interface AuthMeResponse {
   authenticated: boolean;
   user: AuthUser;
+  permissions?: SessionPermissions;
+}
+
+export interface AppRoleAssignment {
+  empCode: string;
+  fullNameEng: string;
+  currentEmail: string;
+  role: 'admin' | 'super_user';
+  source: string;
+  assignedBy: string | null;
+  assignedAt: string;
 }
 
 const appBasePath = (
   (import.meta as ImportMeta & { env?: { BASE_URL?: string } }).env?.BASE_URL || '/'
-).replace(/\/$/g, '');
+).replace(/\/$/, '');
 
 function withAppBase(path: string) {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
@@ -512,6 +768,47 @@ export const api = {
   },
 
   imports: {
+    forecastPreview: async (file: File): Promise<ForecastImportPreview> => {
+      const res = await fetch(withAppBase('/api/import/forecast/preview'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
+        body: await file.arrayBuffer(),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new ApiError(
+          res.status,
+          body?.error ?? `Request failed: ${res.status}`,
+          body && typeof body === 'object' ? body : {}
+        );
+      }
+      return res.json() as Promise<ForecastImportPreview>;
+    },
+    forecastConfirm: (
+      preview: ForecastImportPreview,
+      stampPeriod = 'No'
+    ): Promise<ForecastImportResult> => {
+      if ('previewId' in preview && preview.previewId) {
+        return request('/api/import/forecast/confirm', {
+          method: 'POST',
+          body: JSON.stringify({
+            previewContractVersion: preview.previewContractVersion,
+            previewId: preview.previewId,
+            stampPeriod,
+          }),
+        });
+      }
+      return request('/api/import/forecast/confirm', {
+        method: 'POST',
+        body: JSON.stringify({
+          previewContractVersion: preview.previewContractVersion,
+          stampPeriod,
+          records: 'importableRecords' in preview ? preview.importableRecords : [],
+        }),
+      });
+    },
     currentForecastPreview: async (file: File): Promise<CurrentForecastImportPreview> => {
       const res = await fetch(withAppBase('/api/import/current-forecast/preview'), {
         method: 'POST',
@@ -522,7 +819,11 @@ export const api = {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new ApiError(res.status, body?.error ?? `Request failed: ${res.status}`);
+        throw new ApiError(
+          res.status,
+          body?.error ?? `Request failed: ${res.status}`,
+          body && typeof body === 'object' ? body : {}
+        );
       }
       return res.json() as Promise<CurrentForecastImportPreview>;
     },
@@ -538,5 +839,158 @@ export const api = {
           records: preview.importableRecords,
         }),
       }),
+  },
+
+  overplan: {
+    getConfig: (): Promise<OverplanConfig> => request('/api/overplan/config'),
+    getSummary: (params?: {
+      startMonth?: string;
+      endMonth?: string;
+      view?: 'aggregate' | 'detail';
+      granularity?: 'month' | 'week';
+    }): Promise<{
+      generatedAt: string;
+      view: 'aggregate' | 'detail';
+      summary: { overCount: number; underCount: number };
+    }> => {
+      const query = new URLSearchParams();
+      if (params?.startMonth) query.set('startMonth', params.startMonth);
+      if (params?.endMonth) query.set('endMonth', params.endMonth);
+      if (params?.view) query.set('view', params.view);
+      if (params?.granularity) query.set('granularity', params.granularity);
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      return request(`/api/overplan/summary${suffix}`);
+    },
+    saveConfig: (config: Partial<OverplanConfig>): Promise<OverplanConfig> =>
+      request('/api/overplan/config', {
+        method: 'PATCH',
+        body: JSON.stringify(config),
+      }),
+    listRecipients: (): Promise<OverplanRecipient[]> => request('/api/overplan/recipients'),
+    saveRecipients: (recipients: OverplanRecipient[]): Promise<OverplanRecipient[]> =>
+      request('/api/overplan/recipients', {
+        method: 'PUT',
+        body: JSON.stringify({ recipients }),
+      }),
+    evaluate: (payload: OverplanEvaluateRequest): Promise<OverplanEvaluateResponse> =>
+      request('/api/overplan/evaluate', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    previewNotify: async (payload: Omit<OverplanEvaluateRequest, 'view' | 'page' | 'pageSize' | 'status'>) => {
+      try {
+        return await request<{
+          ok: boolean;
+          previewOnly: true;
+          sent: 0;
+          batches: EmailBatchPreview[];
+          breachedDetailRows: number;
+          breachedAggregateRows: number;
+        }>('/api/overplan/preview-notify', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 404) throw error;
+        return request<{
+          ok: boolean;
+          previewOnly: true;
+          sent: 0;
+          batches: EmailBatchPreview[];
+          breachedDetailRows: number;
+          breachedAggregateRows: number;
+        }>('/api/overplan/notify', {
+          method: 'POST',
+          body: JSON.stringify({ ...payload, previewOnly: true }),
+        });
+      }
+    },
+    notify: (payload: Omit<OverplanEvaluateRequest, 'view' | 'page' | 'pageSize' | 'status'>): Promise<{
+      ok: boolean;
+      sent: number;
+      skipped: string | null;
+      breachedDetailRows: number;
+      breachedAggregateRows: number;
+    }> =>
+      request('/api/overplan/notify', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+  },
+
+  notifications: {
+    previewForecastChange: (payload?: {
+      changedBy?: string;
+      useSample?: boolean;
+      changes?: Array<{
+        ownerName: string;
+        materialCode: string;
+        materialDescription: string;
+        plantCode?: string;
+        period: string;
+        oldQtyFcst: number | null;
+        newQtyFcst: number;
+      }>;
+    }): Promise<{ ok: boolean; previewOnly: true; sent: 0; batches: EmailBatchPreview[] }> =>
+      request('/api/forecast/preview-commit-email', {
+        method: 'POST',
+        body: JSON.stringify(payload ?? { useSample: true }),
+      }),
+    sendForecastChange: (payload: {
+      changedBy?: string;
+      changes: Array<{
+        ownerName: string;
+        materialCode: string;
+        materialDescription: string;
+        plantCode?: string;
+        period: string;
+        oldQtyFcst: number | null;
+        newQtyFcst: number;
+      }>;
+    }): Promise<{ ok: boolean; sent: number; skipped: string | null }> =>
+      request('/api/forecast/send-commit-email', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+  },
+
+  forecastEmail: {
+    listCcRecipients: (): Promise<ForecastCcRecipient[]> =>
+      request('/api/forecast-email/cc-recipients'),
+    saveCcRecipients: (recipients: ForecastCcRecipient[]): Promise<ForecastCcRecipient[]> =>
+      request('/api/forecast-email/cc-recipients', {
+        method: 'PUT',
+        body: JSON.stringify({ recipients }),
+      }),
+    resolveOwners: (ownerNames: string[]): Promise<{ owners: ForecastEmailOwner[] }> =>
+      request('/api/forecast-email/resolve-owners', {
+        method: 'POST',
+        body: JSON.stringify({ ownerNames }),
+      }),
+  },
+
+  employees: {
+    search: (query: string): Promise<{ results: EmployeeContact[] }> =>
+      request(`/api/employees/search?q=${encodeURIComponent(query)}`),
+    sync: (): Promise<{ ok: boolean; synced: number }> =>
+      request('/api/employees/sync', { method: 'POST' }),
+  },
+
+  admin: {
+    listRoles: (): Promise<{ assignments: AppRoleAssignment[] }> =>
+      request('/api/admin/roles'),
+    saveRoles: (assignments: Array<{
+      empCode: string;
+      fullNameEng: string;
+      currentEmail: string;
+      role: 'admin' | 'super_user';
+      source?: string;
+    }>): Promise<{ assignments: AppRoleAssignment[] }> =>
+      request('/api/admin/roles', {
+        method: 'PUT',
+        body: JSON.stringify({ assignments }),
+      }),
+    removeRole: (empCode: string): Promise<{ assignments: AppRoleAssignment[] }> =>
+      request(`/api/admin/roles/${encodeURIComponent(empCode)}`, { method: 'DELETE' }),
   },
 };

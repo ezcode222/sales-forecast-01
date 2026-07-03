@@ -1,5 +1,9 @@
-import { addDays, endOfMonth, format, getDay, parseISO, startOfMonth } from 'date-fns';
 import type { CPLPrice, Dimension, ForecastValue, PriceFormula, Registration, ValueType } from '../../types/forecast';
+import {
+  CURRENT_FORECAST_VERSION_NAME,
+  firstWednesdayPeriod,
+  isMonthPeriodKey,
+} from '../../lib/forecastPeriod';
 
 const isDailyKey = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
 const isWeekRangeKey = (value: string) => /^\d{4}-\d{2}-\d{2}\|\d{4}-\d{2}-\d{2}$/.test(value);
@@ -9,9 +13,18 @@ export const monthKey = (value: string) => {
   return value;
 };
 
-function firstWednesdayOfMonth(value: string) {
-  const monthStart = startOfMonth(parseISO(`${value}-01`));
-  return format(addDays(monthStart, (3 - getDay(monthStart) + 7) % 7), 'yyyy-MM-dd');
+export function getForecastStoragePeriod(
+  displayPeriod: string,
+  forecastMode: 'month' | 'week' | 'day',
+  versionName: string
+) {
+  if (forecastMode !== 'month' || !isMonthPeriodKey(displayPeriod)) {
+    return displayPeriod;
+  }
+  if (versionName === CURRENT_FORECAST_VERSION_NAME) {
+    return firstWednesdayPeriod(displayPeriod);
+  }
+  return displayPeriod;
 }
 
 export function getForecastCellValue(
@@ -53,7 +66,7 @@ export function getForecastCellValue(
           const [rangeStart, rangeEnd] = f.month.split('|');
           return month >= rangeStart && month <= rangeEnd;
         }) ?? (
-          month === firstWednesdayOfMonth(monthKey(month))
+          month === firstWednesdayPeriod(monthKey(month))
             ? (forecastIndex
                 ? forecastIndex.get(`${reg.id}|${selectedVersion}|${monthKey(month)}`)
                 : forecastData.find(
@@ -67,8 +80,6 @@ export function getForecastCellValue(
       : undefined;
 
   const activeItem = directItem ?? fallbackItem;
-  // Actual is shared across forecast versions. Resolve it by registration and
-  // period so a missing/stale version selection cannot hide real DB actuals.
   const actualItem = forecastIndex
     ? forecastIndex.get(`actual|${reg.id}|${month}`) ?? activeItem
     : forecastData.find(
@@ -91,50 +102,14 @@ export function getForecastCellValue(
   const priceAct = actualItem?.priceAct ?? 0;
   let hasAggregatedDailyData = false;
 
-  if (forecastMode === 'month') {
-    if (forecastIndex) {
-      const aggregate =
-        forecastIndex.get(`weeklyMonth|${reg.id}|${selectedVersion}|${month}`) ??
-        forecastIndex.get(`dailyMonth|${reg.id}|${selectedVersion}|${month}`);
-      if (aggregate) {
-        qtyFcst = aggregate.qtyFcst;
-        hasAggregatedDailyData = true;
-      }
-    } else {
-    // Prefer aggregating from weekly entries if present (week is lowest editable level).
-    const monthStartStr = format(parseISO(`${month}-01`), 'yyyy-MM-dd');
-    const monthEndStr = format(endOfMonth(parseISO(`${month}-01`)), 'yyyy-MM-dd');
-
-    const weeklyItems = forecastData.filter(
-      f =>
-        f.registrationId === reg.id &&
-        f.version === selectedVersion &&
-        isWeekRangeKey(f.month) &&
-        // include week if it overlaps the month
-        (() => {
-          const [ws, we] = f.month.split('|');
-          return ws <= monthEndStr && we >= monthStartStr;
-        })()
-    );
-
-    if (weeklyItems.length > 0) {
-      qtyFcst = weeklyItems.reduce((sum, item) => sum + item.qtyFcst, 0);
-      hasAggregatedDailyData = true;
-    } else {
-      const dailyItems = forecastData.filter(
-        f =>
-          f.registrationId === reg.id &&
-          f.version === selectedVersion &&
-          isDailyKey(f.month) &&
-          f.month.startsWith(`${month}-`)
-      );
-
-      if (dailyItems.length > 0) {
-        qtyFcst = dailyItems.reduce((sum, item) => sum + item.qtyFcst, 0);
-        hasAggregatedDailyData = true;
-      }
-    }
-    }
+  if (forecastMode === 'month' && isMonthPeriodKey(month)) {
+    const storagePeriod = getForecastStoragePeriod(month, forecastMode, selectedVersion);
+    const storedItem = forecastIndex
+      ? forecastIndex.get(`${reg.id}|${selectedVersion}|${storagePeriod}`)
+      : forecastData.find(
+          f => f.registrationId === reg.id && f.version === selectedVersion && f.month === storagePeriod
+        );
+    if (storedItem) qtyFcst = storedItem.qtyFcst;
   } else if (forecastMode === 'week' && isWeekRangeKey(month)) {
     const [rangeStart, rangeEnd] = month.split('|');
     const dailyItems = forecastData.filter(
@@ -167,7 +142,6 @@ export function getForecastCellValue(
   } else if (resolvedFormula === 'Fixed Price') {
     priceFcst = fixedPriceMap?.get(reg.id)?.get(pricingMonth) ?? (cpl + reg.spread);
   } else {
-    // CPL
     priceFcst = cpl + reg.spread;
   }
 
@@ -204,8 +178,9 @@ export function getForecastCellValue(
     if (selectedType === 'Act') value = actValue;
     else if (selectedType === 'Fcst') {
       value = fcstValue;
-      if (planningView === 'sale' && reg.sourceStatus !== 'actual_only') {
-        // Week mode is the lowest editable level: allow editing weekly FCST
+      if (forecastMode === 'month') {
+        isEditable = true;
+      } else if (planningView === 'sale' && reg.sourceStatus !== 'actual_only') {
         isEditable = forecastMode === 'week' ? true : !hasAggregatedDailyData;
       } else {
         isEditable = false;

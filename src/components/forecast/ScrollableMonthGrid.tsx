@@ -33,10 +33,27 @@ const formatWeekRangeLabel = (weekKey: string) => {
 const formatWednesdayLabel = (dateKey: string) => format(parseISO(dateKey), 'dd MMM').toUpperCase();
 const formatEditableInputValue = (value: number) => (value === 0 ? '' : String(value));
 const INPUT_COMMIT_DELAY_MS = 60;
+const NON_NEGATIVE_NUMBER_DRAFT_RE = /^\d*\.?\d*$/;
+
+function isAllowedEditableDraft(value: string) {
+  if (value === '' || value === '.') return true;
+  if (value.startsWith('-')) return false;
+  if (!NON_NEGATIVE_NUMBER_DRAFT_RE.test(value)) return false;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed >= 0 : true;
+}
+
 const parseEditableInputValue = (value: string) => {
   const parsed = value.trim() === '' ? 0 : Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return parsed;
 };
+
+function blockNegativeForecastKey(event: React.KeyboardEvent<HTMLInputElement>) {
+  if (event.key === '-' || event.key === '+' || event.key === 'e' || event.key === 'E') {
+    event.preventDefault();
+  }
+}
 
 type TimeoutHandle = ReturnType<typeof globalThis.setTimeout>;
 
@@ -1239,6 +1256,7 @@ function ForecastAuditTooltip({
               commitValue(draftValue);
             }}
             onKeyDown={event => {
+              blockNegativeForecastKey(event);
               if (event.key === 'Enter') {
                 clearScheduledTimeout(commitTimerRef);
                 commitValue(draftValue);
@@ -1247,6 +1265,7 @@ function ForecastAuditTooltip({
             }}
             onChange={event => {
               const nextValue = event.target.value;
+              if (!isAllowedEditableDraft(nextValue)) return;
               setDraftValue(nextValue);
               const parsed = parseEditableInputValue(nextValue);
               if (parsed !== null) {
@@ -1259,6 +1278,7 @@ function ForecastAuditTooltip({
               }
               scheduleCommit(nextValue);
             }}
+            min={0}
             className="h-7 w-full min-w-[72px] max-w-[108px] rounded border border-blue-200 bg-white px-2 text-right font-mono text-[11px] font-bold text-slate-700 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-100"
             aria-label={`Current forecast value for ${state.period}`}
           />
@@ -1366,6 +1386,7 @@ const ForecastEditableCell = React.memo(function ForecastEditableCell({
         commitValue(draftValue);
       }}
       onKeyDown={e => {
+        blockNegativeForecastKey(e);
         if (e.key === 'Enter') {
           clearScheduledTimeout(commitTimerRef);
           commitValue(draftValue);
@@ -1374,6 +1395,7 @@ const ForecastEditableCell = React.memo(function ForecastEditableCell({
       }}
       onChange={e => {
         const nextValue = e.target.value;
+        if (!isAllowedEditableDraft(nextValue)) return;
         setDraftValue(nextValue);
         const parsed = parseEditableInputValue(nextValue);
         if (parsed !== null) {
@@ -1381,6 +1403,7 @@ const ForecastEditableCell = React.memo(function ForecastEditableCell({
         }
         scheduleCommit(nextValue);
       }}
+      min={0}
       className="w-full h-6 text-right font-mono font-bold bg-white border border-blue-200 rounded px-1 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-100"
     />
   );

@@ -341,7 +341,7 @@ export function FilterDropdown({
           className={cn('shrink-0 text-slate-400 transition-transform duration-150', open && 'rotate-180')}
         />
       </button>
-      {typeof document !== 'undefined' &&
+      {globalThis.document !== undefined &&
         createPortal(
           <AnimatePresence>{panel}</AnimatePresence>,
           document.body

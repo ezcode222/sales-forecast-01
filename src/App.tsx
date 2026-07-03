@@ -9,6 +9,7 @@ import {
   BarChart3,
   Settings, 
   FileSpreadsheet, 
+  AlertTriangle,
   ChevronRight, 
   Download,
   Plus,
@@ -21,35 +22,55 @@ import {
   Truck,
   X,
   LogOut,
-  Copy
+  Copy,
+  Mail,
+  Loader2,
+  Package,
+  Shield,
+  Pencil,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format, addMonths, addDays, getDay, startOfMonth, endOfMonth, parseISO } from 'date-fns';
 import { cn } from './lib/utils';
 import { ForecastInputTable } from './components/forecast/ForecastInputTable';
-import { getForecastCellValue } from './components/forecast/forecastCellUtils';
+import { ManageAdminPanel } from './components/forecast/ManageAdminPanel';
+import { ManageEmailPanel } from './components/forecast/ManageEmailPanel';
+import { ManageRegistrationPanel } from './components/forecast/DraftRegistrationPanel';
+import { NavDropdown, NavDropdownItem } from './components/layout/NavDropdown';
+import { SfSelect } from './components/ui/SfSelect';
+const OverplanView = lazy(() =>
+  import('./components/overplan/OverplanView').then(module => ({ default: module.OverplanView }))
+);
+import {
+  NotificationEmailPreviewModal,
+  type EmailBatchPreview,
+} from './components/notifications/NotificationEmailPreviewModal';
+import { getForecastCellValue, getForecastStoragePeriod } from './components/forecast/forecastCellUtils';
 import { filterRegistrations, isColumnFilterActive } from './components/forecast/forecastFilterUtils';
-import { api, ApiError, type AuthUser, type SnapshotStatus } from './lib/api';
-import type {
-  ColumnFiltersState,
-  ColumnFilterValue,
-  ActualValue,
-  CPLPrice,
-  Dimension,
-  ForecastSummary,
-  ForecastSummaryRequest,
-  ForecastValue,
-  InventoryRow,
-  PriceManagementRow,
-  PriceManagementType,
-  PriceFormula,
-  Registration,
-  ValueType,
+import { api, ApiError, formatApiError, type AuthUser, type SessionPermissions, type SnapshotStatus } from './lib/api';
+import { effectivePermissions } from './lib/permissions';
+import {
+  EMPTY_COLUMN_FILTER,
+  type ColumnFiltersState,
+  type ColumnFilterValue,
+  type ActualValue,
+  type CPLPrice,
+  type Dimension,
+  type ForecastSummary,
+  type ForecastSummaryRequest,
+  type ForecastValue,
+  type InventoryRow,
+  type PriceManagementRow,
+  type PriceManagementType,
+  type PriceFormula,
+  type Registration,
+  type ValueType,
 } from './types/forecast';
 
 const lazyRechart = (name: string) => lazy(async () => {
   const module = await import('recharts');
-  return { default: module[name as keyof typeof module] as React.ComponentType<any> };
+  return { default: module[name as keyof typeof module] as React.ComponentType<Record<string, unknown>> };
 });
 const ResponsiveContainer = lazyRechart('ResponsiveContainer');
 const AreaChart = lazyRechart('AreaChart');
@@ -64,11 +85,10 @@ const Cell = lazyRechart('Cell');
 const Legend = lazyRechart('Legend');
 const ReBarChart = lazyRechart('BarChart');
 const Bar = lazyRechart('Bar');
-import { EMPTY_COLUMN_FILTER } from './types/forecast';
 
 // --- Types ---
 
-type AppTab = 'forecast' | 'master' | 'dashboard' | 'weekly' | 'monthly' | 'yearly' | 'mtp' | 'pdc' | 'suggestion';
+type AppTab = 'forecast' | 'master' | 'dashboard' | 'overplan' | 'weekly' | 'monthly' | 'yearly' | 'mtp' | 'pdc' | 'suggestion';
 const FORECAST_SUMMARY_CACHE_TTL_MS = 5 * 60 * 1000;
 const FORECAST_SUMMARY_CACHE_PREFIX = 'forecast-summary:v1:';
 const BU_FILTER_STORAGE_KEY = 'sales-forecast:business-unit-filter:v1';
@@ -175,7 +195,7 @@ async function loadForecastPriceData(
 }
 
 function loadStoredBusinessUnitFilter(): ColumnFiltersState {
-  if (typeof globalThis.localStorage === 'undefined') return {};
+  if (globalThis.localStorage === undefined) return {};
   try {
     const raw = globalThis.localStorage.getItem(BU_FILTER_STORAGE_KEY);
     if (!raw) return {};
@@ -305,15 +325,19 @@ function MonthYearPicker({
 export default function App() {
   const [activeTab, setActiveTab] = useState<AppTab>('forecast');
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [permissions, setPermissions] = useState<SessionPermissions | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+  const [openNavMenu, setOpenNavMenu] = useState<'manage' | 'budget' | null>(null);
+  const [manageAdminOpen, setManageAdminOpen] = useState(false);
+  const [manageEmailOpen, setManageEmailOpen] = useState(false);
+  const [manageRegistrationOpen, setManageRegistrationOpen] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const [isAddingVersion, setIsAddingVersion] = useState(false);
   const [isEditingVersion, setIsEditingVersion] = useState(false);
   const [newVersionName, setNewVersionName] = useState('');
   const [editingVersionName, setEditingVersionName] = useState('');
   const [showDetailModal, setShowDetailModal] = useState(false);
-  const [isAddingCpl, setIsAddingCpl] = useState(false);
   const [isCopyingPriceVersion, setIsCopyingPriceVersion] = useState(false);
   const [selectedFy, setSelectedFy] = useState(2026);
   const [priceManagementType, setPriceManagementType] = useState<PriceManagementType>('Fcst');
@@ -334,6 +358,11 @@ export default function App() {
   const [inventoryByRegistrationId, setInventoryByRegistrationId] = useState<Map<string, InventoryRow>>(new Map());
   const [isInventoryLoading, setIsInventoryLoading] = useState(false);
   const [inventoryCommitPreviewOpen, setInventoryCommitPreviewOpen] = useState(false);
+  const [commitEmailPreviewOpen, setCommitEmailPreviewOpen] = useState(false);
+  const [commitEmailPreviewBatches, setCommitEmailPreviewBatches] = useState<EmailBatchPreview[]>([]);
+  const [commitEmailPreviewLoading, setCommitEmailPreviewLoading] = useState(false);
+  const [commitEmailSending, setCommitEmailSending] = useState(false);
+  const [commitEmailSendMessage, setCommitEmailSendMessage] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
   const inventoryByRegistrationIdRef = useRef<Map<string, InventoryRow>>(new Map());
   const pendingInventoryRequestIdsRef = useRef<Set<string>>(new Set());
   const mergedRegistrationCacheRef = useRef(new Map<string, {
@@ -395,12 +424,32 @@ export default function App() {
   const { start: loadStart, done: loadDone } = useLoading();
   const flash = (ms = 350) => { loadStart(); setTimeout(loadDone, ms); };
 
+  const refreshSessionPermissions = useCallback(() => {
+    return api.auth.me()
+      .then(result => {
+        setAuthUser(result.user);
+        setPermissions(result.permissions ?? {
+          role: 'user',
+          canManageAdmin: false,
+          canManageEmail: false,
+          empCode: null,
+        });
+      })
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     api.auth.me()
       .then(result => {
         if (cancelled) return;
         setAuthUser(result.user);
+        setPermissions(result.permissions ?? {
+          role: 'user',
+          canManageAdmin: false,
+          canManageEmail: false,
+          empCode: null,
+        });
       })
       .catch(error => {
         if (cancelled) return;
@@ -724,9 +773,9 @@ export default function App() {
         if (!cancelled && generation === registrationLoadGenerationRef.current) {
           mergeLoadedForecastData(forecasts, actuals, allVers);
         }
-      } catch (err) {
+      } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
-          const msg = err instanceof ApiError ? err.message : 'Failed to load data. Is the API server running?';
+          const msg = error instanceof ApiError ? error.message : 'Failed to load data. Is the API server running?';
           setAppError(msg);
           setVersions([CURRENT_FORECAST_VERSION]);
         }
@@ -759,9 +808,9 @@ export default function App() {
         if (cancelled) return;
         setPriceManagementRows(rows);
         setAppError(null);
-      } catch (err) {
+      } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
-          setAppError(err instanceof Error ? err.message : 'Failed to load Price Management data');
+          setAppError(error instanceof Error ? error.message : 'Failed to load Price Management data');
         }
       }
     }
@@ -788,9 +837,9 @@ export default function App() {
         setCplPrices(prices.cpl);
         setNaphthaprices(prices.naphtha);
         setBenzeneprices(prices.benzene);
-      } catch (err) {
+      } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
-          setAppError(err instanceof Error ? err.message : 'Failed to load forecast prices');
+          setAppError(error instanceof Error ? error.message : 'Failed to load forecast prices');
         }
       }
     }
@@ -845,9 +894,9 @@ export default function App() {
           mergeLoadedForecastData(forecasts, actuals, activeVersions);
         }
       }
-    } catch (err) {
+    } catch (error) {
       if (!controller.signal.aborted) {
-        const message = err instanceof ApiError ? err.message : 'Failed to load more rows';
+        const message = error instanceof ApiError ? error.message : 'Failed to load more rows';
         setAppError(message);
       }
     } finally {
@@ -924,9 +973,9 @@ export default function App() {
         ) {
           mergeLoadedForecastData(forecasts, actuals, activeVersions);
         }
-      } catch (err) {
+      } catch (error) {
         if (!cancelled && generation === registrationLoadGenerationRef.current) {
-          const message = err instanceof ApiError ? err.message : 'Failed to apply filters';
+          const message = error instanceof ApiError ? error.message : 'Failed to apply filters';
           setAppError(message);
         }
       } finally {
@@ -1050,9 +1099,9 @@ export default function App() {
 
           return Array.from(next.values());
         });
-      } catch (err) {
+      } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
-          const message = err instanceof ApiError ? err.message : 'Failed to refresh actual data';
+          const message = error instanceof ApiError ? error.message : 'Failed to refresh actual data';
           setAppError(message);
         }
       }
@@ -1373,8 +1422,11 @@ export default function App() {
   }, [priceManagementRows, selectedFy]);
 
   const handleForecastChange = useCallback((regId: string, month: string, value: number) => {
+    if (!Number.isFinite(value) || value < 0) return;
+    const storagePeriod = getForecastStoragePeriod(month, forecastMode, selectedVersion);
     const editKey = `${regId}|${selectedVersion}|${month}`;
-    const knownIndex = forecastPositionRef.current.get(editKey);
+    const storageKey = `${regId}|${selectedVersion}|${storagePeriod}`;
+    const knownIndex = forecastPositionRef.current.get(storageKey);
     const existing = knownIndex === undefined
       ? undefined
       : forecastDataRef.current[knownIndex];
@@ -1392,12 +1444,12 @@ export default function App() {
       const indexedItem = knownIndex === undefined ? undefined : prev[knownIndex];
       const index = indexedItem &&
         indexedItem.registrationId === regId &&
-        indexedItem.month === month &&
+        indexedItem.month === storagePeriod &&
         indexedItem.version === selectedVersion
         ? knownIndex
         : prev.findIndex(item =>
             item.registrationId === regId &&
-            item.month === month &&
+            item.month === storagePeriod &&
             item.version === selectedVersion
           );
 
@@ -1406,10 +1458,10 @@ export default function App() {
         newData[index] = { ...newData[index], qtyFcst: value };
         return newData;
       } else {
-        forecastPositionRef.current.set(editKey, prev.length);
+        forecastPositionRef.current.set(storageKey, prev.length);
         return [...prev, {
           registrationId: regId,
-          month,
+          month: storagePeriod,
           version: selectedVersion,
           qtyAct: 0,
           qtyFcst: value,
@@ -1417,12 +1469,24 @@ export default function App() {
         }];
       }
     });
-  }, [selectedVersion]);
+  }, [forecastMode, selectedVersion]);
 
   const pendingForecastEditList = useMemo(
     () => Object.values(pendingForecastEdits) as PendingForecastEdit[],
     [pendingForecastEdits]
   );
+
+  const pendingOwnerNames = useMemo(() => {
+    const byId = new Map<string, Registration>(
+      registrationsWithInventory.map(registration => [registration.id, registration])
+    );
+    const names = new Set<string>();
+    for (const edit of pendingForecastEditList) {
+      const owner = byId.get(edit.registrationId)?.ownerName?.trim();
+      if (owner) names.add(owner);
+    }
+    return [...names];
+  }, [pendingForecastEditList, registrationsWithInventory]);
 
   const inventoryCommitPreviewRows = useMemo<InventoryCommitPreviewRow[]>(() => {
     const registrationsById = new Map<string, Registration>(
@@ -1510,63 +1574,92 @@ export default function App() {
     });
   }, [inventoryByMaterialKey, pendingForecastEditList, registrationsWithInventory]);
 
-  const executeCommitForecastUpdates = useCallback(async () => {
-    if (pendingForecastEditList.length === 0 || isSaving) return;
+  const executeCommitForecastUpdates = useCallback(() => {
+    if (pendingForecastEditList.length === 0) return;
 
-    setIsSaving(true);
-    loadStart();
-    setAppError(null);
-
-    const updates: ForecastValue[] = pendingForecastEditList.map(edit => ({
+    const editsToCommit = [...pendingForecastEditList];
+    const updates: ForecastValue[] = editsToCommit.map(edit => ({
       registrationId: edit.registrationId,
-      month: edit.period,
+      month: getForecastStoragePeriod(edit.period, forecastMode, edit.version),
       version: edit.version,
       qtyAct: 0,
       qtyFcst: edit.currentValue,
       priceAct: 0,
     }));
+    const committedBy = authUser?.name || authUser?.email || 'User (Admin)';
+    const currentStampPeriod = stampPeriod;
+    const currentSummaryRequest = forecastSummaryRequest;
+    const currentSummaryRequestKey = forecastSummaryRequestKey;
 
-    try {
-      setInventoryCommitPreviewOpen(false);
-      await api.forecast.save(
-        updates,
-        authUser?.name || authUser?.email || 'User (Admin)',
-        stampPeriod
+    setInventoryCommitPreviewOpen(false);
+    setPendingForecastEdits({});
+    setForecastAuditVersion(version => version + 1);
+    setForecastSummary(previous => {
+      if (!previous) return previous;
+      const periods = previous.periods.map(period => ({ ...period }));
+      const periodIndex = new Map<string, number>(
+        periods.map((period, index) => [period.period, index])
       );
-      setPendingForecastEdits({});
-      setForecastAuditVersion(version => version + 1);
+      editsToCommit.forEach(edit => {
+        if (edit.version !== selectedVersion) return;
+        const displayPeriod = forecastMode === 'month'
+          ? edit.period.slice(0, 7)
+          : edit.period;
+        const index = periodIndex.get(displayPeriod);
+        if (index === undefined) return;
+        periods[index].qtyFcst += edit.currentValue - edit.baseValue;
+      });
+      return { ...previous, periods };
+    });
+    loadStart();
+    setTimeout(loadDone, 400);
+    setAppError(null);
 
-      setIsForecastSummaryUpdating(true);
+    void (async () => {
       try {
-        const summary = await api.forecast.summary(forecastSummaryRequest);
-        setForecastSummary(summary);
-        window.localStorage.setItem(
-          `${FORECAST_SUMMARY_CACHE_PREFIX}${forecastSummaryRequestKey}`,
-          JSON.stringify({ cachedAt: Date.now(), summary })
-        );
-      } catch (summaryError) {
-        console.error('[forecast summary] refresh after commit failed:', summaryError);
+        await api.forecast.save(updates, committedBy, currentStampPeriod);
+        setIsForecastSummaryUpdating(true);
+        try {
+          const summary = await api.forecast.summary(currentSummaryRequest);
+          setForecastSummary(summary);
+          window.localStorage.setItem(
+            `${FORECAST_SUMMARY_CACHE_PREFIX}${currentSummaryRequestKey}`,
+            JSON.stringify({ cachedAt: Date.now(), summary })
+          );
+        } catch (summaryError) {
+          console.error('[forecast summary] refresh after commit failed:', summaryError);
+        } finally {
+          setIsForecastSummaryUpdating(false);
+        }
+      } catch (error) {
+        setPendingForecastEdits(previous => {
+          const restored = { ...previous };
+          editsToCommit.forEach(edit => {
+            const editKey = `${edit.registrationId}|${edit.version}|${edit.period}`;
+            restored[editKey] = edit;
+          });
+          return restored;
+        });
+        setAppError(error instanceof ApiError ? error.message : 'Failed to commit forecast updates');
       }
-    } catch (error) {
-      setAppError(error instanceof ApiError ? error.message : 'Failed to commit forecast updates');
-    } finally {
-      setIsForecastSummaryUpdating(false);
-      setIsSaving(false);
-      loadDone();
-    }
+    })();
   }, [
+    authUser,
+    forecastMode,
     forecastSummaryRequest,
     forecastSummaryRequestKey,
-    authUser,
-    isSaving,
     loadDone,
     loadStart,
     pendingForecastEditList,
+    selectedVersion,
     stampPeriod,
   ]);
 
-  const handleCommitForecastUpdates = useCallback(async () => {
+  const handleCommitForecastUpdates = useCallback(() => {
     if (pendingForecastEditList.length === 0 || isSaving) return;
+
+    setInventoryCommitPreviewOpen(true);
+
     const pendingRegistrationIds = new Set(
       pendingForecastEditList.map(edit => edit.registrationId)
     );
@@ -1575,22 +1668,85 @@ export default function App() {
       !inventoryByRegistrationIdRef.current.has(registration.id)
     );
     if (pendingRegistrations.length > 0) {
-      loadStart();
-      try {
-        await loadInventoryForRegistrations(pendingRegistrations);
-      } finally {
-        loadDone();
-      }
+      void loadInventoryForRegistrations(pendingRegistrations);
     }
-    setInventoryCommitPreviewOpen(true);
   }, [
     isSaving,
-    loadDone,
     loadInventoryForRegistrations,
-    loadStart,
     pendingForecastEditList,
     registrationsWithInventory,
   ]);
+
+  const handlePreviewCommitEmail = useCallback(async () => {
+    if (inventoryCommitPreviewRows.length === 0) return;
+    try {
+      setCommitEmailPreviewLoading(true);
+      setCommitEmailPreviewOpen(true);
+      const response = await api.notifications.previewForecastChange({
+        useSample: false,
+        changedBy: authUser?.name || authUser?.email || 'Sales Forecast User',
+        changes: inventoryCommitPreviewRows.map(row => ({
+          ownerName: row.registration.ownerName ?? '',
+          materialCode: row.registration.materialCode ?? '',
+          materialDescription: row.registration.materialDescription ?? '',
+          plantCode: row.registration.plantCode ?? '',
+          period: row.period,
+          oldQtyFcst: row.baseValue,
+          newQtyFcst: row.currentValue,
+        })),
+      });
+      setCommitEmailPreviewBatches(response.batches);
+    } catch (error) {
+      setCommitEmailPreviewOpen(false);
+      setAppError(formatApiError(error, 'Failed to preview commit email'));
+    } finally {
+      setCommitEmailPreviewLoading(false);
+    }
+  }, [authUser, inventoryCommitPreviewRows]);
+
+  const handleSendCommitEmail = useCallback(async () => {
+    if (inventoryCommitPreviewRows.length === 0) return;
+    try {
+      setCommitEmailSending(true);
+      setCommitEmailSendMessage(null);
+      const changes = inventoryCommitPreviewRows.map(row => ({
+        ownerName: row.registration.ownerName ?? '',
+        materialCode: row.registration.materialCode ?? '',
+        materialDescription: row.registration.materialDescription ?? '',
+        plantCode: row.registration.plantCode ?? '',
+        period: row.period,
+        oldQtyFcst: row.baseValue,
+        newQtyFcst: row.currentValue,
+      }));
+      const result = await api.notifications.sendForecastChange({
+        changedBy: authUser?.name || authUser?.email || 'Sales Forecast User',
+        changes,
+      });
+      if (result.sent > 0) {
+        setCommitEmailSendMessage({
+          tone: 'success',
+          text: `Sent ${result.sent} email${result.sent === 1 ? '' : 's'} successfully.`,
+        });
+      } else if (result.skipped === 'email_disabled_or_empty') {
+        setCommitEmailSendMessage({
+          tone: 'error',
+          text: 'Email sending is disabled on the server (FORECAST_EMAIL_ENABLED).',
+        });
+      } else {
+        setCommitEmailSendMessage({
+          tone: 'error',
+          text: 'No emails sent — check Manage Email recipients.',
+        });
+      }
+    } catch (error) {
+      setCommitEmailSendMessage({
+        tone: 'error',
+        text: formatApiError(error, 'Failed to send email'),
+      });
+    } finally {
+      setCommitEmailSending(false);
+    }
+  }, [authUser, inventoryCommitPreviewRows]);
 
   const handleCreateManagedRegistration = useCallback(async (registration: Registration) => {
     loadStart();
@@ -1681,32 +1837,73 @@ export default function App() {
     }
   }, [loadDone, loadStart]);
 
-  const handleCurrentForecastImportComplete = useCallback(async () => {
+  const handleCurrentForecastImportComplete = useCallback(async (
+    targetVersion = CURRENT_FORECAST_VERSION,
+    options?: { startMonth?: string; endMonth?: string }
+  ) => {
     const registrationIds = registrations.map(registration => registration.id);
     if (registrationIds.length === 0) return;
+
+    setSelectedVersion(targetVersion);
+    if (versions.includes(targetVersion)) {
+      setPriceManagementVersion(targetVersion);
+    }
+
+    let loadStartMonth = dateRange.start.slice(0, 7);
+    let loadEndMonth = dateRange.end.slice(0, 7);
+    if (options?.startMonth && options?.endMonth) {
+      if (options.startMonth < loadStartMonth) loadStartMonth = options.startMonth;
+      if (options.endMonth > loadEndMonth) loadEndMonth = options.endMonth;
+      setDateRange({ start: loadStartMonth, end: loadEndMonth });
+    }
+
+    const actualGranularity: 'month' | 'week' =
+      targetVersion === CURRENT_FORECAST_VERSION && forecastMode === 'week' ? 'week' : 'month';
+
     loadStart();
     try {
-      const forecasts = await api.forecast.list({
-        version: 'Current Forecast',
-        registrationIds,
-      });
+      const [forecasts, actuals] = await Promise.all([
+        api.forecast.list({
+          version: targetVersion,
+          startPeriod: loadStartMonth,
+          endPeriod: loadEndMonth,
+          registrationIds,
+        }),
+        api.actuals.list(
+          loadStartMonth,
+          loadEndMonth,
+          registrationIds,
+          {},
+          actualGranularity
+        ),
+      ]);
       mergeLoadedForecastData(
         forecasts,
-        [],
-        versions.length > 0 ? versions : ['Current Forecast']
+        actuals,
+        versions.length > 0 ? versions : [targetVersion]
       );
+      setForecastSummary(null);
       setForecastAuditVersion(version => version + 1);
     } finally {
       loadDone();
     }
-  }, [loadDone, loadStart, mergeLoadedForecastData, registrations, versions]);
+  }, [
+    dateRange.end,
+    dateRange.start,
+    forecastMode,
+    loadDone,
+    loadStart,
+    mergeLoadedForecastData,
+    registrations,
+    versions,
+  ]);
 
   const exportToExcel = async () => {
     loadStart();
     try {
       const XLSX = await import('xlsx');
       const data = registrations.map(reg => {
-        const row: any = { ...reg };
+        const row: Record<string, unknown> = { ...reg };
         monthsToShow.forEach(m => {
           const { value } = getForecastCellValue(
             reg,
@@ -1772,8 +1969,8 @@ export default function App() {
         setBenzeneprices(priceRowsToBenzenePrices(priceManagementRows));
       }
       setAppError(null);
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to save price management data';
+    } catch (error) {
+      const msg = error instanceof ApiError ? error.message : 'Failed to save price management data';
       setAppError(msg);
     } finally {
       setIsSaving(false);
@@ -1781,24 +1978,15 @@ export default function App() {
     }
   }, [loadDone, loadStart, priceManagementRows, priceManagementType, priceManagementVersion, selectedVersion]);
 
-  const handleRemovePriceManagementRow = useCallback(async (month: string) => {
-    if (!globalThis.confirm(`Remove price for ${month}?`)) return;
-    loadStart();
-    try {
-      await api.priceManagement.remove(
-        month,
-        priceManagementType,
-        priceManagementType === 'Actual' ? GLOBAL_PRICE_VERSION : priceManagementVersion,
-      );
-      setPriceManagementRows(previous => previous.filter(row => row.month !== month));
-    } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to remove price';
-      setAppError(msg);
-    } finally {
-      loadDone();
-    }
-  }, [loadDone, loadStart, priceManagementType, priceManagementVersion]);
-
+  const sessionPermissions = useMemo(
+    () => effectivePermissions(authUser, permissions),
+    [authUser, permissions]
+  );
+  const isManageNavActive = activeTab === 'master'
+    || manageAdminOpen
+    || manageEmailOpen
+    || manageRegistrationOpen;
+  const isBudgetNavActive = activeTab === 'mtp' || activeTab === 'yearly';
   const displayUserName = authUser?.name || authUser?.email || 'User';
   const userInitials = displayUserName
     .split(/\s+/)
@@ -1820,8 +2008,8 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-[#F8FAFC] text-slate-800 font-sans overflow-hidden">
       {/* Top Branding Bar */}
-      <nav className="h-14 bg-[#007ABE] flex items-center justify-between px-5 shrink-0 z-50 shadow-sm">
-        <div className="flex min-w-0 items-center gap-5">
+      <nav className="relative z-50 flex h-14 shrink-0 items-center justify-between overflow-visible bg-[#007ABE] px-5 shadow-sm">
+        <div className="flex min-w-0 items-center gap-5 overflow-visible">
           <div className="flex items-center gap-2">
             <div className="flex h-8 w-[56px] shrink-0 items-center justify-center rounded-md bg-white shadow-sm" aria-label="UBE">
               <svg viewBox="0 0 120 42" className="h-7 w-[52px]" role="img" aria-hidden="true">
@@ -1843,9 +2031,9 @@ export default function App() {
             <span className="text-white font-bold tracking-tight text-base uppercase whitespace-nowrap">SalesNexus</span>
           </div>
           <div className="h-5 w-[1px] bg-white/25"></div>
-          <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto py-1">
+          <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto overflow-y-visible py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <button
-              onClick={() => { flash(); setActiveTab('forecast'); }}
+              onClick={() => { flash(); setOpenNavMenu(null); setActiveTab('forecast'); }}
               className={cn(
                 "flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-black uppercase tracking-wider transition-all",
                 activeTab === 'forecast' ? "bg-white text-[#007ABE] shadow-sm" : "text-blue-50 hover:bg-white/10 hover:text-white"
@@ -1854,18 +2042,57 @@ export default function App() {
               <FileSpreadsheet size={14} />
               Sales Forecast
             </button>
-            <button 
-              onClick={() => { flash(); setActiveTab('master'); }}
-              className={cn(
-                "flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-black uppercase tracking-wider transition-all",
-                activeTab === 'master' ? "bg-white text-[#007ABE] shadow-sm" : "text-blue-50 hover:bg-white/10 hover:text-white"
-              )}
+            <NavDropdown
+              label="Manage"
+              icon={<Settings size={14} />}
+              isOpen={openNavMenu === 'manage'}
+              onToggle={() => setOpenNavMenu(open => open === 'manage' ? null : 'manage')}
+              onClose={() => setOpenNavMenu(null)}
+              active={isManageNavActive}
             >
-              <Settings size={14} />
-              Price Management
-            </button>
+              {sessionPermissions.role === 'admin' && (
+                <NavDropdownItem
+                  label="Price Base"
+                  icon={<SlidersHorizontal size={14} />}
+                  onClick={() => {
+                    flash();
+                    setOpenNavMenu(null);
+                    setActiveTab('master');
+                  }}
+                />
+              )}
+              {sessionPermissions.canManageAdmin && (
+                <NavDropdownItem
+                  label="Admin"
+                  icon={<Shield size={14} />}
+                  onClick={() => {
+                    setOpenNavMenu(null);
+                    setManageAdminOpen(true);
+                  }}
+                />
+              )}
+              {sessionPermissions.canManageEmail && (
+                <NavDropdownItem
+                  label="Email"
+                  icon={<Mail size={14} />}
+                  onClick={() => {
+                    setOpenNavMenu(null);
+                    setManageEmailOpen(true);
+                  }}
+                />
+              )}
+              <NavDropdownItem
+                label="Registration"
+                icon={<Pencil size={14} />}
+                badge={managedRegistrations.length}
+                onClick={() => {
+                  setOpenNavMenu(null);
+                  setManageRegistrationOpen(true);
+                }}
+              />
+            </NavDropdown>
             <button 
-              onClick={() => { flash(); setActiveTab('dashboard'); }}
+              onClick={() => { flash(); setOpenNavMenu(null); setActiveTab('dashboard'); }}
               className={cn(
                 "flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-black uppercase tracking-wider transition-all",
                 activeTab === 'dashboard' ? "bg-white text-[#007ABE] shadow-sm" : "text-blue-50 hover:bg-white/10 hover:text-white"
@@ -1875,7 +2102,17 @@ export default function App() {
               Analytics
             </button>
             <button
-              onClick={() => { flash(); setActiveTab('pdc'); }}
+              onClick={() => { flash(); setOpenNavMenu(null); setActiveTab('overplan'); }}
+              className={cn(
+                "flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-black uppercase tracking-wider transition-all",
+                activeTab === 'overplan' ? "bg-white text-[#007ABE] shadow-sm" : "text-blue-50 hover:bg-white/10 hover:text-white"
+              )}
+            >
+              <AlertTriangle size={14} />
+              Diff Plan
+            </button>
+            <button
+              onClick={() => { flash(); setOpenNavMenu(null); setActiveTab('pdc'); }}
               className={cn(
                 "flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-black uppercase tracking-wider transition-all",
                 activeTab === 'pdc' ? "bg-white text-[#007ABE] shadow-sm" : "text-blue-50 hover:bg-white/10 hover:text-white"
@@ -1884,26 +2121,33 @@ export default function App() {
               <PieIcon size={14} />
               PDC Summary
             </button>
-            <button
-              onClick={() => { flash(); setActiveTab('mtp'); }}
-              className={cn(
-                "flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-black uppercase tracking-wider transition-all",
-                activeTab === 'mtp' ? "bg-white text-[#007ABE] shadow-sm" : "text-blue-50 hover:bg-white/10 hover:text-white"
-              )}
+            <NavDropdown
+              label="Budget"
+              icon={<Layers size={14} />}
+              isOpen={openNavMenu === 'budget'}
+              onToggle={() => setOpenNavMenu(open => open === 'budget' ? null : 'budget')}
+              onClose={() => setOpenNavMenu(null)}
+              active={isBudgetNavActive}
             >
-              <Calendar size={14} />
-              MTP Budget
-            </button>
-            <button
-              onClick={() => { flash(); setActiveTab('yearly'); }}
-              className={cn(
-                "flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-black uppercase tracking-wider transition-all",
-                activeTab === 'yearly' ? "bg-white text-[#007ABE] shadow-sm" : "text-blue-50 hover:bg-white/10 hover:text-white"
-              )}
-            >
-              <Layers size={14} />
-              Yearly Budget
-            </button>
+              <NavDropdownItem
+                label="MTP BG"
+                icon={<Calendar size={14} />}
+                onClick={() => {
+                  flash();
+                  setOpenNavMenu(null);
+                  setActiveTab('mtp');
+                }}
+              />
+              <NavDropdownItem
+                label="Yearly BG"
+                icon={<Layers size={14} />}
+                onClick={() => {
+                  flash();
+                  setOpenNavMenu(null);
+                  setActiveTab('yearly');
+                }}
+              />
+            </NavDropdown>
           </div>
         </div>
         <div ref={accountMenuRef} className="relative flex items-center gap-3">
@@ -1976,6 +2220,26 @@ export default function App() {
           <button onClick={() => setAppError(null)} className="text-red-400 hover:text-red-600 text-xs ml-4 font-bold">✕ Dismiss</button>
         </div>
       )}
+
+      <ManageAdminPanel
+        open={manageAdminOpen}
+        onClose={() => setManageAdminOpen(false)}
+        sessionEmpCode={sessionPermissions.empCode}
+        onSaved={() => { void refreshSessionPermissions(); }}
+      />
+
+      <ManageEmailPanel
+        open={manageEmailOpen}
+        onClose={() => setManageEmailOpen(false)}
+      />
+
+      <ManageRegistrationPanel
+        open={manageRegistrationOpen}
+        registrations={managedRegistrations}
+        onClose={() => setManageRegistrationOpen(false)}
+        onUpdate={handleUpdateManagedRegistration}
+        onDelete={handleDeleteManagedRegistration}
+      />
 
       {/* Filter Area (Header) */}
       {activeTab === 'forecast' && (
@@ -2151,24 +2415,27 @@ export default function App() {
               </div>
             </FilterGroup>
 
-                <FilterGroup label="Forecast Version">
-                  <div className="flex flex-wrap items-center gap-2 relative">
-                    <div className="relative flex-1 min-w-0">
-                      <select 
-                        value={selectedVersion} 
-                        onChange={e => { flash(); setSelectedVersion(e.target.value); }}
-                        className="sf-select w-full text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors"
-                      >
-                        {versions.map(v => <option key={v}>{v}</option>)}
-                      </select>
-                      <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
-                        <ChevronRight size={14} className="rotate-90" />
-                      </div>
-                    </div>
+            <FilterGroup label="Forecast Version">
+              <div className="flex flex-wrap items-center gap-2 relative">
+                <div className="relative flex-1 min-w-0">
+                  <select
+                    value={selectedVersion}
+                    onChange={e => { flash(); setSelectedVersion(e.target.value); }}
+                    className="sf-select w-full text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors"
+                  >
+                    {versions.map(v => <option key={v}>{v}</option>)}
+                  </select>
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
+                    <ChevronRight size={14} className="rotate-90" />
+                  </div>
+                </div>
                     <button 
-                      onClick={() => setIsAddingVersion(true)}
+                      onClick={() => {
+                        setIsAddingVersion(true);
+                        setIsEditingVersion(false);
+                      }}
                       className="p-1.5 hover:bg-blue-50 text-blue-600 rounded-lg border border-blue-100 transition-colors bg-white shadow-sm"
-                      title="Add New Version"
+                      title="Add new version"
                     >
                       <Plus size={16} />
                     </button>
@@ -2176,11 +2443,12 @@ export default function App() {
                       onClick={() => {
                         setEditingVersionName(selectedVersion);
                         setIsEditingVersion(true);
+                        setIsAddingVersion(false);
                       }}
-                      className="p-1.5 hover:bg-amber-50 text-amber-600 rounded-lg border border-amber-100 transition-colors bg-white shadow-sm"
-                      title="Edit Selected Version"
+                      className="p-1.5 hover:bg-blue-50 text-blue-600 rounded-lg border border-blue-100 transition-colors bg-white shadow-sm"
+                      title="Rename selected version"
                     >
-                      <Settings size={16} />
+                      <Pencil size={16} />
                     </button>
 
                     <AnimatePresence>
@@ -2189,46 +2457,62 @@ export default function App() {
                           initial={{ opacity: 0, scale: 0.95, y: 10 }}
                           animate={{ opacity: 1, scale: 1, y: 0 }}
                           exit={{ opacity: 0, scale: 0.95, y: 10 }}
-                          className="absolute top-full right-0 mt-2 w-64 bg-white rounded-xl shadow-2xl border border-slate-200 p-4 z-[100]"
+                          className="absolute top-full right-0 mt-2 w-72 overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-xl z-[100]"
                         >
-                          <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">Add New Forecast Version</h4>
-                          <input 
-                            autoFocus
-                            type="text" 
-                            value={newVersionName}
-                            onChange={e => setNewVersionName(e.target.value)}
-                            placeholder="e.g. DecF FY26"
-                            className="w-full text-xs border border-slate-200 rounded p-2 focus:border-blue-500 outline-none mb-3"
-                          />
-                          <div className="flex gap-2">
-                            <button 
-                              onClick={async () => {
-                                if (newVersionName && !versions.includes(newVersionName)) {
-                                  try {
-                                    loadStart();
-                                    await api.versions.create(newVersionName);
-                                    setVersions(prev => [...prev, newVersionName]);
-                                    setSelectedVersion(newVersionName);
-                                    setNewVersionName('');
-                                    setIsAddingVersion(false);
-                                  } catch (err) {
-                                    const msg = err instanceof ApiError ? err.message : 'Failed to create version';
-                                    setAppError(msg);
-                                  } finally {
-                                    loadDone();
+                          <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#007ABE] text-white shadow-sm">
+                                <Plus size={14} strokeWidth={2.5} />
+                              </div>
+                              <div className="min-w-0">
+                                <h4 className="text-sm font-semibold text-slate-900">Add forecast version</h4>
+                                <p className="text-[11px] text-slate-500">Create a new plan label for forecasts</p>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="space-y-3 p-4">
+                            <label className="block">
+                              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Version name</span>
+                              <input 
+                                autoFocus
+                                type="text" 
+                                value={newVersionName}
+                                onChange={e => setNewVersionName(e.target.value)}
+                                placeholder="e.g. BB FY26"
+                                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-800 outline-none transition-colors focus:border-[#007ABE] focus:ring-2 focus:ring-[#007ABE]/15"
+                              />
+                            </label>
+                            <div className="flex gap-2 pt-1">
+                              <button 
+                                onClick={async () => {
+                                  if (newVersionName && !versions.includes(newVersionName)) {
+                                    try {
+                                      loadStart();
+                                      await api.versions.create(newVersionName);
+                                      setVersions(prev => [...prev, newVersionName]);
+                                      setSelectedVersion(newVersionName);
+                                      setNewVersionName('');
+                                      setIsAddingVersion(false);
+                                    } catch (error) {
+                                      const msg = error instanceof ApiError ? error.message : 'Failed to create version';
+                                      setAppError(msg);
+                                    } finally {
+                                      loadDone();
+                                    }
                                   }
-                                }
-                              }}
-                              className="flex-1 bg-blue-600 text-white text-[10px] font-bold py-2 rounded-lg"
-                            >
-                              Add Version
-                            </button>
-                            <button 
-                              onClick={() => setIsAddingVersion(false)}
-                              className="flex-1 bg-slate-100 text-slate-600 text-[10px] font-bold py-2 rounded-lg"
-                            >
-                              Cancel
-                            </button>
+                                }}
+                                className="flex-1 rounded-lg bg-[#007ABE] py-2 text-[11px] font-semibold text-white transition-colors hover:bg-[#0069a3] disabled:opacity-50"
+                                disabled={!newVersionName.trim() || versions.includes(newVersionName.trim())}
+                              >
+                                Create version
+                              </button>
+                              <button 
+                                onClick={() => setIsAddingVersion(false)}
+                                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-600 transition-colors hover:bg-slate-50"
+                              >
+                                Cancel
+                              </button>
+                            </div>
                           </div>
                         </motion.div>
                       )}
@@ -2238,53 +2522,79 @@ export default function App() {
                           initial={{ opacity: 0, scale: 0.95, y: 10 }}
                           animate={{ opacity: 1, scale: 1, y: 0 }}
                           exit={{ opacity: 0, scale: 0.95, y: 10 }}
-                          className="absolute top-full right-0 mt-2 w-64 bg-white rounded-xl shadow-2xl border border-slate-200 p-4 z-[100]"
+                          className="absolute top-full right-0 mt-2 w-72 overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-xl z-[100]"
                         >
-                          <h4 className="text-[10px] font-black uppercase tracking-widest text-amber-500 mb-3">Rename Forecast Version</h4>
-                          <p className="text-[9px] text-slate-400 mb-2 font-medium italic">Renaming "{selectedVersion}"</p>
-                          <input 
-                            autoFocus
-                            type="text" 
-                            value={editingVersionName}
-                            onChange={e => setEditingVersionName(e.target.value)}
-                            placeholder="New name..."
-                            className="w-full text-xs border border-slate-200 rounded p-2 focus:border-amber-400 outline-none mb-3"
-                          />
-                          <div className="flex gap-2">
-                            <button 
-                              onClick={() => {
-                                if (editingVersionName && editingVersionName !== selectedVersion && !versions.includes(editingVersionName)) {
-                                  const oldName = selectedVersion;
-                                  const newName = editingVersionName;
-                                  
-                                  // Update versions list
-                                  setVersions(prev => prev.map(v => v === oldName ? newName : v));
-                                  
-                                  // Update forecast data
-                                  setForecastData(prev => prev.map(f => f.version === oldName ? { ...f, version: newName } : f));
-                                  
-                                  // Update selected version
-                                  setSelectedVersion(newName);
-                                  flash();
-                                  setIsEditingVersion(false);
-                                } else if (editingVersionName === selectedVersion) {
-                                  setIsEditingVersion(false);
-                                }
-                              }}
-                              className="flex-1 bg-amber-500 text-white text-[10px] font-bold py-2 rounded-lg"
-                            >
-                              Update
-                            </button>
-                            <button 
-                              onClick={() => setIsEditingVersion(false)}
-                              className="flex-1 bg-slate-100 text-slate-600 text-[10px] font-bold py-2 rounded-lg"
-                            >
-                              Cancel
-                            </button>
+                          <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#007ABE] text-white shadow-sm">
+                                <Pencil size={14} strokeWidth={2.5} />
+                              </div>
+                              <div className="min-w-0">
+                                <h4 className="text-sm font-semibold text-slate-900">Rename version</h4>
+                                <p className="text-[11px] text-slate-500">Change the label shown in the version list</p>
+                              </div>
+                            </div>
                           </div>
-                          {versions.includes(editingVersionName) && editingVersionName !== selectedVersion && (
-                            <p className="text-[8px] text-red-500 mt-2 font-bold uppercase tracking-tighter">Name already exists!</p>
-                          )}
+                          <div className="space-y-3 p-4">
+                            <div>
+                              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Current name</span>
+                              <p className="truncate rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700">
+                                {selectedVersion}
+                              </p>
+                            </div>
+                            <label className="block">
+                              <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">New name</span>
+                              <input 
+                                autoFocus
+                                type="text" 
+                                value={editingVersionName}
+                                onChange={e => setEditingVersionName(e.target.value)}
+                                placeholder="Enter new version name"
+                                className={cn(
+                                  'w-full rounded-lg border px-3 py-2 text-xs text-slate-800 outline-none transition-colors focus:ring-2 focus:ring-[#007ABE]/15',
+                                  versions.includes(editingVersionName.trim()) && editingVersionName.trim() !== selectedVersion
+                                    ? 'border-red-300 focus:border-red-400'
+                                    : 'border-slate-200 focus:border-[#007ABE]'
+                                )}
+                              />
+                            </label>
+                            {versions.includes(editingVersionName.trim()) && editingVersionName.trim() !== selectedVersion && (
+                              <p className="text-[11px] font-medium text-red-600">This name is already used by another version.</p>
+                            )}
+                            <div className="flex gap-2 pt-1">
+                              <button 
+                                onClick={() => {
+                                  const trimmed = editingVersionName.trim();
+                                  if (trimmed && trimmed !== selectedVersion && !versions.includes(trimmed)) {
+                                    const oldName = selectedVersion;
+                                    const newName = trimmed;
+                                    
+                                    setVersions(prev => prev.map(v => v === oldName ? newName : v));
+                                    setForecastData(prev => prev.map(f => f.version === oldName ? { ...f, version: newName } : f));
+                                    setSelectedVersion(newName);
+                                    flash();
+                                    setIsEditingVersion(false);
+                                  } else if (trimmed === selectedVersion) {
+                                    setIsEditingVersion(false);
+                                  }
+                                }}
+                                disabled={
+                                  !editingVersionName.trim() ||
+                                  editingVersionName.trim() === selectedVersion ||
+                                  versions.includes(editingVersionName.trim())
+                                }
+                                className="flex-1 rounded-lg bg-[#007ABE] py-2 text-[11px] font-semibold text-white transition-colors hover:bg-[#0069a3] disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                Save name
+                              </button>
+                              <button 
+                                onClick={() => setIsEditingVersion(false)}
+                                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-600 transition-colors hover:bg-slate-50"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
                         </motion.div>
                       )}
                     </AnimatePresence>
@@ -2292,37 +2602,23 @@ export default function App() {
                 </FilterGroup>
 
                 <FilterGroup label="STAMP PERIOD">
-                  <div className="relative">
-                    <select
-                      value={stampPeriod}
-                      onChange={e => { flash(); setStampPeriod(e.target.value); }}
-                      className="sf-select w-full text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors"
-                    >
-                      {STAMP_PERIOD_OPTIONS.map(option => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </select>
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
-                      <ChevronRight size={14} className="rotate-90" />
-                    </div>
-                  </div>
+                  <SfSelect
+                    value={stampPeriod}
+                    onChange={nextPeriod => { flash(); setStampPeriod(nextPeriod); }}
+                    options={STAMP_PERIOD_OPTIONS}
+                  />
                 </FilterGroup>
 
                 <FilterGroup label="VIEW MODE">
-                  <div className="relative">
-                    <select
-                      value={planningView}
-                      onChange={e => { flash(); setPlanningView(e.target.value as 'sale' | 'accounting' | 'production'); }}
-                      className="sf-select w-full text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors"
-                    >
-                      <option value="sale">Sale Input</option>
-                      <option value="accounting">Accounting</option>
-                      <option value="production">Production</option>
-                    </select>
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
-                      <ChevronRight size={14} className="rotate-90" />
-                    </div>
-                  </div>
+                  <SfSelect
+                    value={planningView}
+                    onChange={nextView => { flash(); setPlanningView(nextView as 'sale' | 'accounting' | 'production'); }}
+                    options={[
+                      { value: 'sale', label: 'Sale Input' },
+                      { value: 'accounting', label: 'Accounting' },
+                      { value: 'production', label: 'Production' },
+                    ]}
+                  />
                 </FilterGroup>
 
             {(nonBusinessUnitFilterCount > 0 || businessUnitFilterValues.length > 0) && (
@@ -2364,20 +2660,15 @@ export default function App() {
           <div className="flex items-end justify-between gap-4 w-full">
             <div className="flex items-end gap-4 min-w-0">
               <FilterGroup label="Fiscal Year (FY)">
-                <div className="relative">
-                  <select 
-                    value={selectedFy} 
-                    onChange={e => { flash(); setSelectedFy(Number(e.target.value)); }}
-                    className="sf-select w-64 text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors shadow-sm"
-                  >
-                    {[2024, 2025, 2026, 2027, 2028].map(y => (
-                      <option key={y} value={y}>FY {String(y).slice(-2)} ({y}-04 to {y+1}-03)</option>
-                    ))}
-                  </select>
-                  <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
-                    <ChevronRight size={14} className="rotate-90" />
-                  </div>
-                </div>
+                <SfSelect
+                  className="w-64"
+                  value={String(selectedFy)}
+                  onChange={nextFy => { flash(); setSelectedFy(Number(nextFy)); }}
+                  options={[2024, 2025, 2026, 2027, 2028].map(year => ({
+                    value: String(year),
+                    label: `FY ${String(year).slice(-2)} (${year}-04 to ${year + 1}-03)`,
+                  }))}
+                />
               </FilterGroup>
             </div>
 
@@ -2403,43 +2694,32 @@ export default function App() {
               </FilterGroup>
 
               <FilterGroup label="Forecast Version">
-                <div className="relative">
-                  <select
-                    value={priceManagementVersion}
-                    disabled={priceManagementType === 'Actual'}
-                    onChange={e => { flash(); setPriceManagementVersion(e.target.value); }}
-                    className="sf-select w-52 text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors shadow-sm disabled:bg-slate-100 disabled:text-slate-400"
-                  >
-                    {versions.map(version => (
-                      <option key={version} value={version}>{version}</option>
-                    ))}
-                  </select>
-                  <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
-                    <ChevronRight size={14} className="rotate-90" />
-                  </div>
-                </div>
+                <SfSelect
+                  className="w-56"
+                  value={priceManagementVersion}
+                  disabled={priceManagementType === 'Actual'}
+                  onChange={nextVersion => { flash(); setPriceManagementVersion(nextVersion); }}
+                  options={versions}
+                />
               </FilterGroup>
 
-              {priceManagementType === 'Fcst' && (
-                <button
-                  onClick={() => {
-                    const firstSource = versions.find(version => version !== priceManagementVersion) ?? CURRENT_FORECAST_VERSION;
-                    setCopySourceVersion(firstSource);
-                    setIsCopyingPriceVersion(true);
-                  }}
-                  disabled={versions.length < 2}
-                  className="bg-white hover:bg-blue-50 text-blue-600 border border-blue-100 text-[10px] font-bold py-2 px-4 rounded-lg shadow-sm flex items-center gap-1 uppercase tracking-wider transition-all active:scale-95 disabled:opacity-50"
-                >
-                  <Copy size={12} />
-                  Copy
-                </button>
-              )}
-              <button 
-                onClick={() => setIsAddingCpl(true)}
-                className="bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold py-2 px-4 rounded-lg shadow-sm flex items-center gap-1 uppercase tracking-wider transition-all active:scale-95"
+              <button
+                type="button"
+                onClick={() => {
+                  const firstSource = versions.find(version => version !== priceManagementVersion) ?? CURRENT_FORECAST_VERSION;
+                  setCopySourceVersion(firstSource);
+                  setIsCopyingPriceVersion(true);
+                }}
+                disabled={priceManagementType !== 'Fcst' || versions.length < 2}
+                aria-hidden={priceManagementType !== 'Fcst'}
+                tabIndex={priceManagementType === 'Fcst' ? 0 : -1}
+                className={cn(
+                  'bg-white hover:bg-blue-50 text-blue-600 border border-blue-100 text-[10px] font-bold py-2 px-4 rounded-lg shadow-sm flex items-center gap-1 uppercase tracking-wider transition-all active:scale-95 disabled:opacity-50',
+                  priceManagementType !== 'Fcst' && 'invisible pointer-events-none'
+                )}
               >
-                <Plus size={12} />
-                Add Month to FY{String(selectedFy).slice(-2)}
+                <Copy size={12} />
+                Copy
               </button>
               <button 
                 onClick={async () => {
@@ -2505,10 +2785,7 @@ export default function App() {
                   hasMoreRows={hasMoreRegistrations}
                   onLoadMore={loadMoreRegistrations}
                   loadFilterOptions={loadFilterOptions}
-                  managedRegistrations={managedRegistrations}
                   onCreateManagedRegistration={handleCreateManagedRegistration}
-                  onUpdateManagedRegistration={handleUpdateManagedRegistration}
-                  onDeleteManagedRegistration={handleDeleteManagedRegistration}
                   onImportComplete={handleCurrentForecastImportComplete}
                   forecastSummary={displayedForecastSummary}
                   isForecastSummaryUpdating={isForecastSummaryUpdating}
@@ -2519,10 +2796,24 @@ export default function App() {
                 <InventoryCommitPreviewModal
                   open={inventoryCommitPreviewOpen}
                   rows={inventoryCommitPreviewRows}
-                  isSaving={isSaving}
                   isInventoryLoading={isInventoryLoading}
                   onClose={() => setInventoryCommitPreviewOpen(false)}
-                  onConfirm={() => void executeCommitForecastUpdates()}
+                  onConfirm={executeCommitForecastUpdates}
+                  onPreviewEmail={() => { void handlePreviewCommitEmail(); }}
+                  isEmailPreviewLoading={commitEmailPreviewLoading}
+                />
+
+                <NotificationEmailPreviewModal
+                  open={commitEmailPreviewOpen}
+                  batches={commitEmailPreviewBatches}
+                  loading={commitEmailPreviewLoading}
+                  sending={commitEmailSending}
+                  sendMessage={commitEmailSendMessage}
+                  onSend={() => { void handleSendCommitEmail(); }}
+                  onClose={() => {
+                    setCommitEmailPreviewOpen(false);
+                    setCommitEmailSendMessage(null);
+                  }}
                 />
 
                 {/* Bottom Status Bar */}
@@ -2568,7 +2859,7 @@ export default function App() {
                       disabled={isSaving || pendingForecastEditList.length === 0}
                       className="bg-green-600 hover:bg-green-700 text-white text-[10px] font-bold px-4 py-1.5 rounded shadow-sm hover:shadow-md transition-all active:scale-95 uppercase tracking-wider disabled:opacity-50"
                     >
-                      {isSaving ? 'Committing...' : 'Commit Updates'}
+                      Commit Updates
                     </button>
                   </div>
                 </div>
@@ -2591,8 +2882,7 @@ export default function App() {
                         <th className="w-[18%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-left">Period Description</th>
                         <th className="w-[20%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">CPL (USD/Ton)</th>
                         <th className="w-[20%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">Naphtha (USD/Ton)</th>
-                        <th className="w-[20%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">Benzene (USD/Ton)</th>
-                        <th className="w-[10%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-center tracking-widest">Actions</th>
+                        <th className="w-[22%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">Benzene (USD/Ton)</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-xs font-semibold">
@@ -2648,29 +2938,14 @@ export default function App() {
                               />
                             </div>
                           </td>
-                          <td className="px-4 py-3 text-center">
-                            <button
-                              type="button"
-                              onClick={() => void handleRemovePriceManagementRow(cpl.month)}
-                              className="text-red-400 hover:text-red-600 text-[10px] font-black uppercase tracking-widest hover:underline transition-all"
-                            >
-                              Remove
-                            </button>
-                          </td>
                         </tr>
                       ))}
                       {filteredCplPrices.length === 0 && (
                         <tr>
-                          <td colSpan={6} className="p-12 text-center">
+                          <td colSpan={5} className="p-12 text-center">
                             <div className="flex flex-col items-center gap-2 opacity-30">
                               <Calendar size={48} />
                               <p className="font-bold uppercase tracking-widest text-xs">No data for FY {String(selectedFy).slice(-2)}</p>
-                              <button 
-                                onClick={() => setIsAddingCpl(true)}
-                                className="mt-4 bg-blue-600 text-white px-4 py-2 rounded text-[10px] font-bold"
-                              >
-                                Initialize FY {String(selectedFy).slice(-2)}
-                              </button>
                             </div>
                           </td>
                         </tr>
@@ -2702,7 +2977,7 @@ export default function App() {
             )}
 
             {activeTab === 'dashboard' && (
-              <motion.div 
+              <motion.div
                 key="dashboard"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -2715,6 +2990,18 @@ export default function App() {
                   description="Power BI weekly and monthly sales reports will open from this area when the report link is ready."
                 />
               </motion.div>
+            )}
+
+            {activeTab === 'overplan' && (
+              <Suspense fallback={
+                <div className="flex flex-1 items-center justify-center text-sm font-semibold text-slate-400">
+                  Loading Diff Plan…
+                </div>
+              }>
+                <div className="flex min-h-0 flex-1">
+                  <OverplanView />
+                </div>
+              </Suspense>
             )}
 
             {activeTab === 'weekly' && (
@@ -2734,41 +3021,6 @@ export default function App() {
           </AnimatePresence>
         </main>
       </div>
-
-      {isAddingCpl && (
-        <AddCplModal 
-          fy={selectedFy} 
-          cplPrices={filteredCplPrices}
-          onClose={() => setIsAddingCpl(false)} 
-          onAdd={async (months, price) => {
-            try {
-              loadStart();
-              const existingMonths = new Set(priceManagementRows.map(row => row.month));
-              const rowsToAdd = months
-                .filter(month => !existingMonths.has(month))
-                .map(month => ({
-                  month,
-                  cplPrice: price,
-                  naphthaPrice: 0,
-                  benzenePrice: 0,
-                }));
-              const nextRows = [...priceManagementRows, ...rowsToAdd].sort((a, b) => a.month.localeCompare(b.month));
-              await api.priceManagement.saveBulk(
-                priceManagementType,
-                priceManagementType === 'Actual' ? GLOBAL_PRICE_VERSION : priceManagementVersion,
-                nextRows
-              );
-              setPriceManagementRows(nextRows);
-              setIsAddingCpl(false);
-            } catch (err) {
-              const msg = err instanceof ApiError ? err.message : 'Failed to add price month';
-              setAppError(msg);
-            } finally {
-              loadDone();
-            }
-          }}
-        />
-      )}
 
       {isCopyingPriceVersion && (
         <CopyPriceVersionModal
@@ -2793,8 +3045,8 @@ export default function App() {
               }
               setIsCopyingPriceVersion(false);
               setAppError(null);
-            } catch (err) {
-              const msg = err instanceof ApiError ? err.message : 'Failed to copy price version';
+            } catch (error) {
+              const msg = error instanceof ApiError ? error.message : 'Failed to copy price version';
               setAppError(msg);
             } finally {
               setIsSaving(false);
@@ -2818,17 +3070,19 @@ export default function App() {
 function InventoryCommitPreviewModal({
   open,
   rows,
-  isSaving,
   isInventoryLoading,
+  isEmailPreviewLoading,
   onClose,
   onConfirm,
+  onPreviewEmail,
 }: {
   open: boolean;
   rows: InventoryCommitPreviewRow[];
-  isSaving: boolean;
   isInventoryLoading: boolean;
+  isEmailPreviewLoading?: boolean;
   onClose: () => void;
   onConfirm: () => void;
+  onPreviewEmail: () => void;
 }) {
   if (!open) return null;
 
@@ -2840,125 +3094,156 @@ function InventoryCommitPreviewModal({
           maximumFractionDigits: 3,
         });
   const totalDelta = rows.reduce((sum, row) => sum + row.delta, 0);
-  const inventoryDate = rows.find(row => row.inventory?.inventoryDate)?.inventory?.inventoryDate ?? '-';
+  const inventoryDate = rows.find(row => row.inventory?.inventoryDate)?.inventory?.inventoryDate ?? null;
+  const rowsWithInventory = rows.filter(row => row.inventory).length;
 
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative flex max-h-[86vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-100 bg-slate-50 px-5 py-4">
-          <div className="min-w-0">
-            <h3 className="text-sm font-black uppercase tracking-[0.18em] text-slate-800">
-              Inventory Impact Preview
-            </h3>
-            <p className="mt-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              Preview only. Inventory deduction rules are not saved in this phase. Inventory date: {inventoryDate}
-            </p>
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px]" onClick={onClose} />
+      <div className="relative flex max-h-[86vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-xl">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#007ABE]/10 text-[#007ABE]">
+              <Package size={18} />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-base font-semibold tracking-tight text-slate-900">
+                Confirm forecast save
+              </h3>
+              <p className="mt-0.5 text-xs leading-relaxed text-slate-500">
+                Review forecast changes and related inventory before saving.
+                {inventoryDate ? ` Inventory as of ${inventoryDate}.` : ''}
+              </p>
+            </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-white hover:text-slate-700"
-            aria-label="Close inventory preview"
+            className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+            aria-label="Close"
           >
             <X size={18} />
           </button>
         </div>
 
-        <div className="grid shrink-0 grid-cols-3 gap-3 border-b border-slate-100 px-5 py-3">
-          <div className="rounded-lg border border-slate-200 bg-white p-3">
-            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Changed Cells</p>
-            <p className="mt-1 font-mono text-2xl font-black text-slate-800">{rows.length.toLocaleString()}</p>
+        <div className="grid shrink-0 grid-cols-3 gap-3 border-b border-slate-100 bg-slate-50/50 px-5 py-3">
+          <div className="rounded-lg border border-slate-200/80 bg-white px-3 py-2.5">
+            <p className="text-[10px] font-medium text-slate-400">Changed cells</p>
+            <p className="mt-0.5 font-mono text-xl font-semibold tabular-nums text-slate-800">
+              {rows.length.toLocaleString()}
+            </p>
           </div>
-          <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
-            <p className="text-[9px] font-black uppercase tracking-widest text-blue-500">Total Forecast Delta</p>
-            <p className="mt-1 font-mono text-2xl font-black text-blue-700">{formatQty(totalDelta)}</p>
+          <div className="rounded-lg border border-slate-200/80 bg-white px-3 py-2.5">
+            <p className="text-[10px] font-medium text-slate-400">Total forecast delta</p>
+            <p className={cn(
+              'mt-0.5 font-mono text-xl font-semibold tabular-nums',
+              totalDelta > 0 ? 'text-[#007ABE]' : totalDelta < 0 ? 'text-rose-600' : 'text-slate-800'
+            )}>
+              {totalDelta > 0 ? '+' : ''}{formatQty(totalDelta)}
+            </p>
           </div>
-          <div className="rounded-lg border border-amber-100 bg-amber-50 p-3">
-            <p className="text-[9px] font-black uppercase tracking-widest text-amber-600">Inventory Status</p>
-            <p className="mt-1 text-xs font-black uppercase text-amber-700">
-              {isInventoryLoading ? 'Loading Inventory' : 'Preview Only'}
+          <div className="rounded-lg border border-slate-200/80 bg-white px-3 py-2.5">
+            <p className="text-[10px] font-medium text-slate-400">Inventory loaded</p>
+            <p className="mt-0.5 text-sm font-semibold text-slate-800">
+              {isInventoryLoading ? (
+                <span className="inline-flex items-center gap-1.5 text-slate-500">
+                  <Loader2 size={14} className="animate-spin" />
+                  Loading…
+                </span>
+              ) : (
+                <span className="font-mono tabular-nums">
+                  {rowsWithInventory}/{rows.length}
+                </span>
+              )}
             </p>
           </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto">
           <table className="min-w-[1180px] w-full border-collapse text-xs">
-            <thead className="sticky top-0 z-10 bg-slate-100 text-[10px] font-black uppercase tracking-wider text-slate-500">
-              <tr className="divide-x divide-slate-200">
-                <th className="p-3 text-left">Registration</th>
-                <th className="p-3 text-left">Period</th>
-                <th className="p-3 text-left">Plant</th>
-                <th className="p-3 text-left">Material</th>
-                <th className="p-3 text-right">Old Fcst</th>
-                <th className="p-3 text-right">New Fcst</th>
-                <th className="p-3 text-right">Delta</th>
-                <th className="p-3 text-right">Pending Material</th>
-                <th className="p-3 text-right">A0</th>
-                <th className="p-3 text-right">NonA0</th>
-                <th className="p-3 text-right">WaitJudge</th>
-                <th className="p-3 text-right">OG</th>
-                <th className="p-3 text-right">YO</th>
+            <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-[10px] font-semibold text-slate-500">
+              <tr>
+                <th className="px-3 py-2.5 text-left font-medium">Registration</th>
+                <th className="px-3 py-2.5 text-left font-medium">Period</th>
+                <th className="px-3 py-2.5 text-left font-medium">Plant</th>
+                <th className="px-3 py-2.5 text-left font-medium">Material</th>
+                <th className="px-3 py-2.5 text-right font-medium">Old fcst</th>
+                <th className="px-3 py-2.5 text-right font-medium">New fcst</th>
+                <th className="px-3 py-2.5 text-right font-medium">Delta</th>
+                <th className="px-3 py-2.5 text-right font-medium">Pending</th>
+                <th className="px-3 py-2.5 text-right font-medium">A0</th>
+                <th className="px-3 py-2.5 text-right font-medium">Non-A0</th>
+                <th className="px-3 py-2.5 text-right font-medium">Wait judge</th>
+                <th className="px-3 py-2.5 text-right font-medium">OG</th>
+                <th className="px-3 py-2.5 text-right font-medium">YO</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map(row => (
-                <tr key={row.key} className="divide-x divide-slate-50 hover:bg-slate-50">
-                  <td className="max-w-[240px] p-3">
-                    <div className="truncate font-bold text-slate-800" title={row.registration.registrationTopic}>
+                <tr key={row.key} className="transition-colors hover:bg-slate-50/80">
+                  <td className="max-w-[240px] px-3 py-2.5">
+                    <div className="truncate font-medium text-slate-800" title={row.registration.registrationTopic}>
                       {row.registration.registrationTopic || row.registration.id}
                     </div>
-                    <div className="truncate text-[10px] font-semibold text-slate-400">
-                      {row.registration.ownerName || '-'}
+                    <div className="truncate text-[10px] text-slate-400">
+                      {row.registration.ownerName || '—'}
                     </div>
                   </td>
-                  <td className="p-3 font-mono font-bold text-slate-600">{row.period}</td>
-                  <td className="p-3 font-mono font-bold text-blue-700">{row.registration.plantCode || '-'}</td>
-                  <td className="p-3">
-                    <div className="font-mono font-bold text-slate-700">{row.registration.materialCode || '-'}</div>
-                    <div className="truncate text-[10px] text-slate-400">{row.registration.materialDescription || '-'}</div>
+                  <td className="px-3 py-2.5 font-mono text-slate-600">{row.period}</td>
+                  <td className="px-3 py-2.5 font-mono text-slate-600">{row.registration.plantCode || '—'}</td>
+                  <td className="px-3 py-2.5">
+                    <div className="font-mono text-slate-700">{row.registration.materialCode || '—'}</div>
+                    <div className="truncate text-[10px] text-slate-400">{row.registration.materialDescription || '—'}</div>
                   </td>
-                  <td className="p-3 text-right font-mono text-slate-500">{formatQty(row.baseValue)}</td>
-                  <td className="p-3 text-right font-mono font-bold text-slate-800">{formatQty(row.currentValue)}</td>
+                  <td className="px-3 py-2.5 text-right font-mono tabular-nums text-slate-500">{formatQty(row.baseValue)}</td>
+                  <td className="px-3 py-2.5 text-right font-mono tabular-nums font-medium text-slate-800">{formatQty(row.currentValue)}</td>
                   <td className={cn(
-                    'p-3 text-right font-mono font-black',
-                    row.delta >= 0 ? 'text-blue-700' : 'text-rose-600'
+                    'px-3 py-2.5 text-right font-mono tabular-nums font-medium',
+                    row.delta > 0 ? 'text-[#007ABE]' : row.delta < 0 ? 'text-rose-600' : 'text-slate-500'
                   )}>
-                    {formatQty(row.delta)}
+                    {row.delta > 0 ? '+' : ''}{formatQty(row.delta)}
                   </td>
-                  <td className="p-3 text-right font-mono font-bold text-indigo-700">
+                  <td className="px-3 py-2.5 text-right font-mono tabular-nums text-slate-700">
                     {formatQty(row.pendingMaterialDelta)}
                   </td>
-                  <td className="p-3 text-right font-mono font-bold text-emerald-700">{formatQty(row.inventory?.a0Qty)}</td>
-                  <td className="p-3 text-right font-mono font-bold text-amber-700">{formatQty(row.inventory?.nonA0Qty)}</td>
-                  <td className="p-3 text-right font-mono font-bold text-sky-700">{formatQty(row.inventory?.waitJudgeQty)}</td>
-                  <td className="p-3 text-right font-mono font-bold text-rose-700">{formatQty(row.inventory?.ogQty)}</td>
-                  <td className="p-3 text-right font-mono font-bold text-violet-700">{formatQty(row.inventory?.yoQty)}</td>
+                  <td className="px-3 py-2.5 text-right font-mono tabular-nums text-slate-600">{formatQty(row.inventory?.a0Qty)}</td>
+                  <td className="px-3 py-2.5 text-right font-mono tabular-nums text-slate-600">{formatQty(row.inventory?.nonA0Qty)}</td>
+                  <td className="px-3 py-2.5 text-right font-mono tabular-nums text-slate-600">{formatQty(row.inventory?.waitJudgeQty)}</td>
+                  <td className="px-3 py-2.5 text-right font-mono tabular-nums text-slate-600">{formatQty(row.inventory?.ogQty)}</td>
+                  <td className="px-3 py-2.5 text-right font-mono tabular-nums text-slate-600">{formatQty(row.inventory?.yoQty)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
 
-        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-100 bg-slate-50 px-5 py-4">
-          <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-            Confirm Save writes Forecast only. Inventory allocation save waits for Data Analyst rules.
+        <div className="flex shrink-0 items-center justify-between gap-4 border-t border-slate-100 px-5 py-3.5">
+          <p className="max-w-md text-[11px] leading-relaxed text-slate-400">
+            Saving updates forecast values only. Inventory allocation rules will be applied in a later phase.
           </p>
-          <div className="flex gap-2">
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={onPreviewEmail}
+              disabled={isEmailPreviewLoading || rows.length === 0}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 disabled:opacity-50"
+            >
+              {isEmailPreviewLoading ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
+              {isEmailPreviewLoading ? 'Loading…' : 'Send email'}
+            </button>
             <button
               type="button"
               onClick={onClose}
-              className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-[10px] font-black uppercase tracking-wider text-slate-600 transition-colors hover:bg-slate-100"
+              className="h-9 rounded-lg border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
             >
               Cancel
             </button>
             <button
               type="button"
               onClick={onConfirm}
-              disabled={isSaving}
-              className="rounded-lg bg-green-600 px-5 py-2 text-[10px] font-black uppercase tracking-wider text-white shadow-sm transition-colors hover:bg-green-700 disabled:cursor-wait disabled:opacity-60"
+              className="h-9 rounded-lg bg-[#007ABE] px-5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-[#0069a3]"
             >
-              {isSaving ? 'Saving...' : 'Confirm Save'}
+              Confirm save
             </button>
           </div>
         </div>
@@ -2999,53 +3284,83 @@ function CopyPriceVersionModal({
     <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
       <button
         type="button"
-        className="absolute inset-0 bg-slate-900/35 backdrop-blur-sm"
+        className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px]"
         aria-label="Close copy forecast price dialog"
         onClick={onClose}
       />
-      <div className="relative w-full max-w-xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-        <div className="flex items-start justify-between border-b border-slate-100 bg-white px-6 py-5">
-          <div>
-            <h3 className="text-lg font-black tracking-tight text-slate-900">Copy Forecast Price</h3>
-            <p className="mt-1 text-xs font-semibold text-slate-500">
-              FY {String(fy).slice(-2)} · Overwrite target version
-            </p>
+      <div className="relative w-full max-w-lg overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-xl">
+        <header className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#007ABE]/10 text-[#007ABE]">
+              <Copy size={18} />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-base font-semibold tracking-tight text-slate-900">
+                Copy forecast price
+              </h3>
+              <p className="mt-0.5 text-xs leading-relaxed text-slate-500">
+                FY {String(fy).slice(-2)} · Copy prices into the target version
+              </p>
+            </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-white hover:text-slate-700"
+            className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+            aria-label="Close"
           >
             <X size={18} />
           </button>
-        </div>
-        <div className="space-y-4 px-6 py-5">
-          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Target Version</p>
-            <p className="mt-1 text-sm font-bold text-slate-800">{targetVersion}</p>
-          </div>
-          <FilterGroup label="Copy From Version">
-            <div className="relative">
-              <select
-                value={selectedSource}
-                onChange={event => onSourceChange(event.target.value)}
-                className="sf-select h-11 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 pr-9 text-sm font-bold text-slate-800 outline-none transition-colors hover:border-blue-200 focus:border-blue-400"
-              >
-                {sourceOptions.map(version => (
-                  <option key={version} value={version}>{version}</option>
-                ))}
-              </select>
+        </header>
+
+        <div className="space-y-4 px-5 py-4">
+          <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-3">
+            <div>
+              <label htmlFor="copy-source-version" className="mb-1.5 block text-[11px] font-medium text-slate-500">
+                Copy from
+              </label>
+              <div className="relative">
+                <select
+                  id="copy-source-version"
+                  value={selectedSource}
+                  onChange={event => onSourceChange(event.target.value)}
+                  className="sf-select h-10 w-full appearance-none rounded-lg border px-3 pr-9 text-sm outline-none"
+                >
+                  {sourceOptions.map(version => (
+                    <option key={version} value={version}>{version}</option>
+                  ))}
+                </select>
+                <ChevronRight
+                  size={14}
+                  className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rotate-90 text-slate-400"
+                />
+              </div>
             </div>
-          </FilterGroup>
-          <p className="text-xs leading-5 text-slate-500">
-            This will overwrite CPL, Naphtha, and Benzene prices for all months in the selected fiscal year.
-          </p>
+
+            <div className="flex h-10 items-center justify-center pb-0.5 text-slate-300">
+              <ChevronRight size={18} />
+            </div>
+
+            <div>
+              <p className="mb-1.5 text-[11px] font-medium text-slate-500">Copy to</p>
+              <div className="flex h-10 items-center rounded-lg border border-slate-200 bg-slate-50 px-3">
+                <p className="truncate text-sm font-semibold text-slate-800">{targetVersion}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-amber-100 bg-amber-50/60 px-3.5 py-3">
+            <p className="text-xs leading-relaxed text-amber-900/80">
+              This replaces CPL, Naphtha, and Benzene prices for every month in FY {String(fy).slice(-2)} in <span className="font-semibold">{targetVersion}</span>.
+            </p>
+          </div>
         </div>
-        <div className="flex justify-end gap-3 border-t border-slate-100 bg-slate-50 px-6 py-4">
+
+        <footer className="flex items-center justify-end gap-2 border-t border-slate-100 px-5 py-3.5">
           <button
             type="button"
             onClick={onClose}
-            className="h-11 min-w-[132px] rounded-lg border border-slate-200 bg-white px-5 text-xs font-black uppercase tracking-wide text-slate-500 transition-colors hover:bg-slate-100"
+            className="h-9 rounded-lg border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
           >
             Cancel
           </button>
@@ -3053,11 +3368,12 @@ function CopyPriceVersionModal({
             type="button"
             onClick={onCopy}
             disabled={isSaving || !selectedSource}
-            className="h-11 min-w-[132px] rounded-lg bg-blue-600 px-5 text-xs font-black uppercase tracking-wide text-white shadow-sm transition-colors hover:bg-blue-700 disabled:opacity-50"
+            className="inline-flex h-9 min-w-[120px] items-center justify-center gap-1.5 rounded-lg bg-[#007ABE] px-4 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-[#0069a3] disabled:opacity-50"
           >
-            {isSaving ? 'Copying...' : 'Confirm Copy'}
+            {isSaving ? <Loader2 size={14} className="animate-spin" /> : <Copy size={14} />}
+            {isSaving ? 'Copying…' : 'Confirm copy'}
           </button>
-        </div>
+        </footer>
       </div>
     </div>
   );
@@ -3145,109 +3461,6 @@ function DetailModal({ onClose, data, registrations }: Readonly<{ onClose: () =>
   );
 }
 
-function AddCplModal({ fy, onClose, onAdd, cplPrices }: Readonly<{ fy: number; onClose: () => void; onAdd: (months: string[], price: number) => void; cplPrices: CPLPrice[] }>) {
-  const [selectedMonths, setSelectedMonths] = useState<string[]>(['04']);
-  const [price, setPrice] = useState<number>(3500);
-
-  const months = ['04', '05', '06', '07', '08', '09', '10', '11', '12', '01', '02', '03'];
-  
-  const getFullMonth = (m: string) => {
-    const year = Number(m) >= 4 ? fy : fy + 1;
-    return `${year}-${m}`;
-  };
-
-  const existingMonths = new Set(cplPrices.map(c => c.month));
-  const selectedFullMonths = selectedMonths
-    .map(getFullMonth)
-    .filter(month => !existingMonths.has(month));
-  const hasSelection = selectedFullMonths.length > 0;
-
-  const toggleMonth = (month: string) => {
-    const fullMonth = getFullMonth(month);
-    if (existingMonths.has(fullMonth)) return;
-    setSelectedMonths(prev =>
-      prev.includes(month)
-        ? prev.filter(item => item !== month)
-        : [...prev, month]
-    );
-  };
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} onClick={onClose} className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" />
-      <motion.div 
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden p-8"
-      >
-        <h3 className="text-xl font-bold text-slate-800 mb-2">Add Monthly Prices</h3>
-        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-8">Fiscal Year {fy} Management</p>
-
-        <div className="space-y-6">
-          <FilterGroup label="Select Months">
-            <div className="grid grid-cols-4 gap-2">
-              {months.map(m => {
-                const fullMonth = getFullMonth(m);
-                const exists = existingMonths.has(fullMonth);
-                const isSelected = selectedMonths.includes(m) && !exists;
-                return (
-                  <button 
-                    key={m}
-                    disabled={exists}
-                    onClick={() => toggleMonth(m)}
-                    className={cn(
-                      "py-2 rounded-xl text-[10px] font-black uppercase border transition-all",
-                      isSelected ? "bg-blue-600 text-white border-blue-600 shadow-lg shadow-blue-500/30" : 
-                      exists ? "bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed line-through" : 
-                      "bg-white text-slate-600 border-slate-200 hover:border-blue-400"
-                    )}
-                  >
-                    {format(parseISO(fullMonth + '-01'), 'MMM')}
-                    <span className="block text-[8px] opacity-60 font-bold">{fullMonth.split('-')[0]}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <p className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              {selectedFullMonths.length} month{selectedFullMonths.length === 1 ? '' : 's'} selected
-            </p>
-          </FilterGroup>
-
-          <FilterGroup label="Standard Base Price (USD)">
-            <div className="relative group">
-              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 font-bold">$</span>
-              <input 
-                type="number"
-                autoFocus
-                value={price}
-                onChange={e => setPrice(Number(e.target.value))}
-                className="w-full bg-slate-50 border border-slate-200 rounded-2xl py-4 pl-8 pr-4 text-2xl font-mono font-black text-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-100 outline-none transition-all"
-                placeholder="0.00"
-              />
-            </div>
-          </FilterGroup>
-
-          <div className="pt-4 flex flex-col gap-3">
-            <button 
-              disabled={!hasSelection}
-              onClick={() => onAdd(selectedFullMonths, price)}
-              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 text-white py-4 rounded-2xl text-xs font-black uppercase tracking-widest shadow-xl shadow-blue-500/20 active:scale-95 transition-all"
-            >
-              Confirm and Add {selectedFullMonths.length > 1 ? `${selectedFullMonths.length} Months` : 'Month'}
-            </button>
-            <button 
-              onClick={onClose}
-              className="w-full py-4 text-xs font-black uppercase tracking-widest text-slate-400 hover:text-slate-600 transition-colors"
-            >
-              Nevermind, Go Back
-            </button>
-          </div>
-        </div>
-      </motion.div>
-    </div>
-  );
-}
-
 // --- Component Views ---
 
 function ReportView({ title, description, data, registrations, type, onShowDetail }: { title: string; description: string; data: ForecastValue[]; registrations: Registration[]; type: 'weekly' | 'monthly'; onShowDetail: () => void }) {
@@ -3299,7 +3512,7 @@ function ReportView({ title, description, data, registrations, type, onShowDetai
             const worksheet = XLSX.utils.json_to_sheet(trendData);
               const workbook = XLSX.utils.book_new();
               XLSX.utils.book_append_sheet(workbook, worksheet, "Performance_Trend");
-              XLSX.writeFile(workbook, `${title.replace(/\s+/g, '_')}_${format(new Date(), 'yyyyMMdd')}.xlsx`);
+              XLSX.writeFile(workbook, `${title.split(/\s+/).join('_')}_${format(new Date(), 'yyyyMMdd')}.xlsx`);
             }}
             className="bg-white border border-slate-200 text-slate-600 px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-slate-50 transition shadow-sm"
           >
