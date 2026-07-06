@@ -6,7 +6,7 @@ import { cn } from '../../lib/utils';
 import type { ColumnFilterValue, Registration } from '../../types/forecast';
 import type { FilterOptionsPage } from '../../lib/api';
 import { EMPTY_COLUMN_FILTER } from '../../types/forecast';
-import { getUniqueColumnValues, isColumnFilterActive } from './forecastFilterUtils';
+import { dedupeFilterOptions, formatFilterOptionLabel, getUniqueColumnValues, isColumnFilterActive, normalizeFilterOptionValue } from './forecastFilterUtils';
 
 export interface FilterDropdownProps {
   columnKey: string;
@@ -27,10 +27,11 @@ function stopDragPropagation(e: React.SyntheticEvent) {
 }
 
 function formatSelectionSummary(selected: string[]): string {
-  if (selected.length === 0) return '';
-  if (selected.length === 1) return selected[0];
-  if (selected.length === 2) return `${selected[0]}, ${selected[1]}`;
-  return `${selected[0]}, ${selected[1]} +${selected.length - 2}`;
+  const labels = selected.map(value => formatFilterOptionLabel(normalizeFilterOptionValue(value)));
+  if (labels.length === 0) return '';
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return `${labels[0]}, ${labels[1]}`;
+  return `${labels[0]}, ${labels[1]} +${labels.length - 2}`;
 }
 
 export function FilterDropdown({
@@ -54,13 +55,16 @@ export function FilterDropdown({
 
   const filter = value ?? EMPTY_COLUMN_FILTER;
   const active = isColumnFilterActive(filter);
-  const selectedSet = useMemo(() => new Set(filter.selectedValues), [filter.selectedValues]);
+  const selectedSet = useMemo(
+    () => new Set(filter.selectedValues.map(normalizeFilterOptionValue)),
+    [filter.selectedValues]
+  );
 
   const allOptions = useMemo(
     () => {
-      if (staticOptions) return staticOptions;
+      if (staticOptions) return dedupeFilterOptions(staticOptions);
       if (!loadOptions) return getUniqueColumnValues(registrations, columnKey);
-      return Array.from(new Set([...filter.selectedValues, ...remoteOptions]));
+      return dedupeFilterOptions([...filter.selectedValues, ...remoteOptions]);
     },
     [staticOptions, loadOptions, remoteOptions, registrations, columnKey, filter.selectedValues]
   );
@@ -87,7 +91,7 @@ export function FilterDropdown({
           if (cancelled) return;
 
           setRemoteOptions(previous =>
-            Array.from(new Set([...previous, ...page.items]))
+            dedupeFilterOptions([...previous, ...page.items])
           );
           cursor = page.nextCursor;
           hasMore = page.hasMore && Boolean(cursor);
@@ -154,15 +158,16 @@ export function FilterDropdown({
   }, [open]);
 
   const toggleValue = (option: string) => {
-    const next = new Set(filter.selectedValues);
-    if (next.has(option)) next.delete(option);
-    else next.add(option);
+    const normalized = normalizeFilterOptionValue(option);
+    const next = new Set(filter.selectedValues.map(normalizeFilterOptionValue));
+    if (next.has(normalized)) next.delete(normalized);
+    else next.add(normalized);
     onChange({ selectedValues: Array.from(next), searchText: '' });
   };
 
   const selectAllVisible = () => {
-    const next = new Set(filter.selectedValues);
-    filteredOptions.forEach(opt => next.add(opt));
+    const next = new Set(filter.selectedValues.map(normalizeFilterOptionValue));
+    filteredOptions.forEach(opt => next.add(normalizeFilterOptionValue(opt)));
     onChange({ selectedValues: Array.from(next), searchText: '' });
   };
 
@@ -251,11 +256,11 @@ export function FilterDropdown({
         ) : filteredOptions.length === 0 ? (
           <p className="px-3 py-3 text-[10px] text-slate-400 text-center italic">No matching values</p>
         ) : (
-          filteredOptions.map(option => {
+          filteredOptions.map((option, index) => {
             const checked = selectedSet.has(option);
             return (
               <button
-                key={option}
+                key={option ? option : `__blank__-${index}`}
                 type="button"
                 role="option"
                 aria-selected={checked}
@@ -273,7 +278,7 @@ export function FilterDropdown({
                 >
                   {checked && <Check size={9} className="text-white" strokeWidth={3} />}
                 </span>
-                <span className="truncate font-medium">{option}</span>
+                <span className="truncate font-medium">{formatFilterOptionLabel(option)}</span>
               </button>
             );
           })

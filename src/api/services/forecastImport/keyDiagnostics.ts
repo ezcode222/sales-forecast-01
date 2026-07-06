@@ -61,15 +61,15 @@ export function detectEmptyKeySegments(parsed: ParsedExcelKey): string[] {
 export function defaultUnmatchedHint(reasonCode: UnmatchedRowDiagnostic['reasonCode']): string {
   switch (reasonCode) {
     case 'invalid_key_format':
-      return 'Use format SoldTo/ShipTo/EndUser/Plant/Material/OnOff with all segments filled';
+      return 'Invalid key format — registration will be created from the Excel key on confirm';
     case 'non_main_registration':
-      return 'Use the Main Registration key from CRM (MainRegist = 1)';
+      return 'Non-main CRM registration — a new master registration will be created from the Excel key on confirm';
     case 'onoff_mismatch':
-      return 'Change On/Off in the Excel key to match CRM, or update CRM registration';
+      return 'On/Off mismatch with CRM — a new registration will be created from the Excel key on confirm';
     case 'has_actual_no_crm':
-      return 'Create or activate a CRM Main Registration for this key before importing forecast';
+      return 'Actual exists without CRM — registration will be created automatically on confirm';
     case 'crm_not_found':
-      return 'Verify SoldTo, ShipTo, EndUser, Plant, Material, and On/Off against CRM Main Registration';
+      return 'Not in CRM — registration will be created automatically on confirm';
     default:
       return 'Review the key and CRM registration data';
   }

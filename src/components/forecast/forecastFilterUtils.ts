@@ -1,6 +1,40 @@
 import type { ColumnFilterValue, ColumnFiltersState, Registration } from '../../types/forecast';
 import { EMPTY_COLUMN_FILTER } from '../../types/forecast';
 
+const INVISIBLE_FILTER_CHARS = /[\u0000-\u001F\u007F-\u009F\u00A0\u200B-\u200D\uFEFF]/g;
+export const BLANK_FILTER_OPTION = '';
+
+export function normalizeFilterOptionValue(value: unknown): string {
+  return String(value ?? '')
+    .replace(INVISIBLE_FILTER_CHARS, '')
+    .trim();
+}
+
+export function isBlankFilterOptionValue(value: unknown): boolean {
+  return normalizeFilterOptionValue(value) === BLANK_FILTER_OPTION;
+}
+
+export function formatFilterOptionLabel(value: string): string {
+  return isBlankFilterOptionValue(value) ? '(Blank)' : value;
+}
+
+export function dedupeFilterOptions(values: Iterable<string>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const normalized = normalizeFilterOptionValue(value);
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+  }
+  return result.sort((a, b) => {
+    if (!a) return -1;
+    if (!b) return 1;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+}
+
 export function getRegistrationFieldValue(reg: Registration, key: string): string {
   const value = reg[key as keyof Registration];
   if (key.startsWith('inventory') && typeof value === 'number') {
@@ -13,12 +47,9 @@ export function getRegistrationFieldValue(reg: Registration, key: string): strin
 }
 
 export function getUniqueColumnValues(registrations: Registration[], key: string): string[] {
-  const values = new Set<string>();
-  registrations.forEach(reg => {
-    const v = getRegistrationFieldValue(reg, key).trim();
-    if (v) values.add(v);
-  });
-  return Array.from(values).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return dedupeFilterOptions(
+    registrations.map(reg => getRegistrationFieldValue(reg, key))
+  );
 }
 
 export function normalizeColumnFilter(filter?: ColumnFilterValue): ColumnFilterValue {
@@ -37,8 +68,10 @@ export function matchesColumnFilter(reg: Registration, key: string, filter?: Col
   const { selectedValues } = normalizeColumnFilter(filter);
   if (selectedValues.length === 0) return true;
 
-  const regLower = getRegistrationFieldValue(reg, key).toLowerCase();
-  return selectedValues.some(selected => regLower === selected.toLowerCase());
+  const regValue = normalizeFilterOptionValue(getRegistrationFieldValue(reg, key));
+  return selectedValues.some(selected =>
+    regValue === normalizeFilterOptionValue(selected)
+  );
 }
 
 export function filterRegistrations(

@@ -5,16 +5,20 @@ import {
   SKIP_SHEET_NAMES,
 } from './constants';
 import {
+  buildExtendedForecastColumns,
   findHeaderIndex,
   firstValue,
+  firstWednesdayPeriod,
   forecastColumnSignature,
   forecastNumberInvalidReason,
+  buildSyntheticImportKey,
   getOnOffFromKey,
   normalizeHeader,
   normalizeKey,
   parseForecastMonthColumn,
   parseForecastNumber,
   sheetHasLegacyImportLayout,
+  type ExtendedForecastColumn,
 } from './excelUtils';
 import type {
   ExcelForecastGroup,
@@ -23,10 +27,39 @@ import type {
   SourceSheetRow,
 } from './types';
 
+function mergeExcelGroups(existing: ExcelForecastGroup, incoming: ExcelForecastGroup) {
+  existing.sourceRows.push(...incoming.sourceRows);
+  existing.sourceSheetRows.push(...incoming.sourceSheetRows);
+  incoming.forecastValues.forEach((value, index) => {
+    existing.forecastValues[index] += value;
+  });
+  incoming.priceValues.forEach((value, index) => {
+    existing.priceValues[index] += value;
+  });
+  incoming.amountValues.forEach((value, index) => {
+    existing.amountValues[index] += value;
+  });
+  existing.country = existing.country ?? incoming.country;
+  existing.soldTo = existing.soldTo ?? incoming.soldTo;
+  existing.shipTo = existing.shipTo ?? incoming.shipTo;
+  existing.enduser = existing.enduser ?? incoming.enduser;
+  existing.plant = existing.plant ?? incoming.plant;
+  existing.materialCode = existing.materialCode ?? incoming.materialCode;
+  existing.onOff = existing.onOff ?? incoming.onOff;
+  existing.process = existing.process ?? incoming.process;
+  existing.application = existing.application ?? incoming.application;
+  existing.subApplication = existing.subApplication ?? incoming.subApplication;
+  existing.owner = existing.owner ?? incoming.owner;
+  existing.businessUnit = existing.businessUnit ?? incoming.businessUnit;
+}
+
 export type SheetParseResult = {
   sheetName: string;
   totalDataRows: number;
   forecastColumns: ForecastImportColumn[];
+  extendedColumns: ExtendedForecastColumn[];
+  hasPriceColumns: boolean;
+  hasAmountColumns: boolean;
   headerErrors: ImportHeaderError[];
   detectedHeaders: Array<{ index: number; name: string }>;
   missingKeyRows: Array<{ sourceSheet: string; sourceRow: number }>;
@@ -51,6 +84,9 @@ export type MergedSheetParseResult = {
   sheetNames: string[];
   totalDataRows: number;
   forecastColumns: ForecastImportColumn[];
+  extendedColumns: ExtendedForecastColumn[];
+  hasPriceColumns: boolean;
+  hasAmountColumns: boolean;
   headerErrors: ImportHeaderError[];
   detectedHeaders: Array<{ index: number; name: string }>;
   missingKeyRows: Array<{ sourceSheet: string; sourceRow: number }>;
@@ -98,9 +134,17 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
     index,
     name: normalizeHeader(value),
   }));
-  const forecastColumns = header
-    .map((value, index) => parseForecastMonthColumn(value, index))
-    .filter((column): column is ForecastImportColumn => column !== null);
+  const { columns: extendedColumns, hasPriceColumns, hasAmountColumns } = buildExtendedForecastColumns(
+    header,
+    firstWednesdayPeriod
+  );
+  const forecastColumns: ForecastImportColumn[] = extendedColumns.map(column => ({
+    col: column.col,
+    index: column.index,
+    header: column.header,
+    month: column.month,
+    period: column.period,
+  }));
   const businessUnitColumnIndex = findHeaderIndex(header, ['BU', 'Business Unit', 'BusinessUnit']);
 
   if (normalizeHeader(header[0]) !== KEY_HEADER) {
@@ -152,10 +196,11 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
 
   dataRows.forEach((row, index) => {
     const sourceRow = index + 2;
-    const key = normalizeKey(row[0]);
-    if (!key) {
+    const rawKey = normalizeKey(row[0]);
+    const keyMissing = !rawKey;
+    const key = rawKey || buildSyntheticImportKey(sheetName, sourceRow);
+    if (keyMissing) {
       missingKeyRows.push({ sourceSheet: sheetName, sourceRow });
-      return;
     }
 
     const group = excelGroups.get(key) ?? {
@@ -174,7 +219,9 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
       subApplication: null,
       owner: null,
       businessUnit: null,
-      forecastValues: forecastColumns.map(() => 0),
+      forecastValues: extendedColumns.map(() => 0),
+      priceValues: extendedColumns.map(() => 0),
+      amountValues: extendedColumns.map(() => 0),
       hasInvalidNumber: false,
     };
 
@@ -196,23 +243,58 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
       businessUnitColumnIndex >= 0 ? row[businessUnitColumnIndex] : null
     );
 
-    forecastColumns.forEach((forecastColumn, forecastIndex) => {
-      const rawValue = row[forecastColumn.index];
-      const parsed = parseForecastNumber(rawValue);
-      if (!parsed.ok) {
-        group.hasInvalidNumber = true;
+    extendedColumns.forEach((forecastColumn, forecastIndex) => {
+      const qtyRaw = row[forecastColumn.qtyIndex];
+      const qtyParsed = parseForecastNumber(qtyRaw);
+      if (!qtyParsed.ok) {
         invalidNumericValues.push({
           sourceSheet: sheetName,
           sourceRow,
           excelKeyForNoRegist: key,
           column: forecastColumn.col,
           header: forecastColumn.header,
-          value: rawValue,
-          reason: forecastNumberInvalidReason(rawValue),
+          value: qtyRaw,
+          reason: forecastNumberInvalidReason(qtyRaw),
         });
-        return;
+      } else {
+        group.forecastValues[forecastIndex] += qtyParsed.value;
       }
-      group.forecastValues[forecastIndex] += parsed.value;
+
+      if (hasPriceColumns && forecastColumn.priceIndex >= 0) {
+        const priceRaw = row[forecastColumn.priceIndex];
+        const priceParsed = parseForecastNumber(priceRaw);
+        if (!priceParsed.ok) {
+          invalidNumericValues.push({
+            sourceSheet: sheetName,
+            sourceRow,
+            excelKeyForNoRegist: key,
+            column: XLSX.utils.encode_col(forecastColumn.priceIndex),
+            header: forecastColumn.priceHeader,
+            value: priceRaw,
+            reason: forecastNumberInvalidReason(priceRaw),
+          });
+        } else {
+          group.priceValues[forecastIndex] += priceParsed.value;
+        }
+      }
+
+      if (hasAmountColumns && forecastColumn.amountIndex >= 0) {
+        const amountRaw = row[forecastColumn.amountIndex];
+        const amountParsed = parseForecastNumber(amountRaw);
+        if (!amountParsed.ok) {
+          invalidNumericValues.push({
+            sourceSheet: sheetName,
+            sourceRow,
+            excelKeyForNoRegist: key,
+            column: XLSX.utils.encode_col(forecastColumn.amountIndex),
+            header: forecastColumn.amountHeader,
+            value: amountRaw,
+            reason: forecastNumberInvalidReason(amountRaw),
+          });
+        } else {
+          group.amountValues[forecastIndex] += amountParsed.value;
+        }
+      }
     });
 
     excelGroups.set(key, group);
@@ -222,6 +304,9 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
     sheetName,
     totalDataRows: dataRows.length,
     forecastColumns,
+    extendedColumns,
+    hasPriceColumns,
+    hasAmountColumns,
     headerErrors,
     detectedHeaders,
     missingKeyRows,
@@ -236,6 +321,9 @@ export function mergeLegacySheetResults(sheetResults: SheetParseResult[]): Merge
       sheetNames: [],
       totalDataRows: 0,
       forecastColumns: [],
+      extendedColumns: [],
+      hasPriceColumns: false,
+      hasAmountColumns: false,
       headerErrors: [],
       detectedHeaders: [],
       missingKeyRows: [],
@@ -266,7 +354,6 @@ export function mergeLegacySheetResults(sheetResults: SheetParseResult[]): Merge
   const invalidNumericValues = sheetResults.flatMap(result => result.invalidNumericValues);
   const excelGroups = new Map<string, ExcelForecastGroup>();
   const crossSheetDuplicateKeys: CrossSheetDuplicateKey[] = [];
-  const crossSheetBlockedKeys = new Set<string>();
 
   for (const result of sheetResults) {
     for (const group of result.excelGroups.values()) {
@@ -277,6 +364,8 @@ export function mergeLegacySheetResults(sheetResults: SheetParseResult[]): Merge
           sourceRows: [...group.sourceRows],
           sourceSheetRows: [...group.sourceSheetRows],
           forecastValues: [...group.forecastValues],
+          priceValues: [...group.priceValues],
+          amountValues: [...group.amountValues],
         });
         continue;
       }
@@ -284,49 +373,28 @@ export function mergeLegacySheetResults(sheetResults: SheetParseResult[]): Merge
       const incomingSheet = result.sheetName;
       const existingSheets = new Set(existing.sourceSheetRows.map(entry => entry.sourceSheet));
       if (!existingSheets.has(incomingSheet)) {
-        if (!crossSheetBlockedKeys.has(group.keyNoRegist)) {
-          crossSheetBlockedKeys.add(group.keyNoRegist);
-          crossSheetDuplicateKeys.push({
+        let crossEntry = crossSheetDuplicateKeys.find(item => item.excelKeyForNoRegist === group.keyNoRegist);
+        if (!crossEntry) {
+          crossEntry = {
             excelKeyForNoRegist: group.keyNoRegist,
-            entries: [...existing.sourceSheetRows, ...group.sourceSheetRows],
-          });
-        } else {
-          const crossEntry = crossSheetDuplicateKeys.find(item => item.excelKeyForNoRegist === group.keyNoRegist);
-          crossEntry?.entries.push(...group.sourceSheetRows);
+            entries: [...existing.sourceSheetRows],
+          };
+          crossSheetDuplicateKeys.push(crossEntry);
         }
-        excelGroups.delete(group.keyNoRegist);
-        continue;
+        crossEntry.entries.push(...group.sourceSheetRows);
       }
 
-      existing.sourceRows.push(...group.sourceRows);
-      existing.sourceSheetRows.push(...group.sourceSheetRows);
-      group.forecastValues.forEach((value, index) => {
-        existing.forecastValues[index] += value;
-      });
-      existing.hasInvalidNumber = existing.hasInvalidNumber || group.hasInvalidNumber;
-      existing.country = existing.country ?? group.country;
-      existing.soldTo = existing.soldTo ?? group.soldTo;
-      existing.shipTo = existing.shipTo ?? group.shipTo;
-      existing.enduser = existing.enduser ?? group.enduser;
-      existing.plant = existing.plant ?? group.plant;
-      existing.materialCode = existing.materialCode ?? group.materialCode;
-      existing.onOff = existing.onOff ?? group.onOff;
-      existing.process = existing.process ?? group.process;
-      existing.application = existing.application ?? group.application;
-      existing.subApplication = existing.subApplication ?? group.subApplication;
-      existing.owner = existing.owner ?? group.owner;
-      existing.businessUnit = existing.businessUnit ?? group.businessUnit;
+      mergeExcelGroups(existing, group);
     }
-  }
-
-  for (const key of crossSheetBlockedKeys) {
-    excelGroups.delete(key);
   }
 
   return {
     sheetNames,
     totalDataRows: sheetResults.reduce((sum, result) => sum + result.totalDataRows, 0),
     forecastColumns: canonical.forecastColumns,
+    extendedColumns: canonical.extendedColumns,
+    hasPriceColumns: sheetResults.some(result => result.hasPriceColumns),
+    hasAmountColumns: sheetResults.some(result => result.hasAmountColumns),
     headerErrors,
     detectedHeaders: canonical.detectedHeaders,
     missingKeyRows,

@@ -124,6 +124,7 @@ export interface Registration {
   carryOutLoading: number;
   priceFormula: string;
   spread: number;
+  createdBy?: string;
   inventoryA0Qty?: number;
   inventoryNonA0Qty?: number;
   inventoryWaitJudgeQty?: number;

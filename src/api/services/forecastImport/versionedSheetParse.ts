@@ -5,6 +5,8 @@ import {
   VERSIONED_PREFERRED_SHEET_NAMES,
 } from './constants';
 import {
+  buildExtendedForecastColumns,
+  buildSyntheticImportKey,
   findHeaderIndex,
   firstDayOfMonthPeriod,
   firstValue,
@@ -15,7 +17,6 @@ import {
   normalizeKey,
   parseForecastMonthColumn,
   parseForecastNumber,
-  parseMonthTokenFromPrefixedHeader,
 } from './excelUtils';
 import type {
   ExcelVersionedGroup,
@@ -24,10 +25,38 @@ import type {
   VersionedForecastColumn,
 } from './types';
 
+function mergeExcelGroups(existing: ExcelVersionedGroup, incoming: ExcelVersionedGroup) {
+  existing.sourceRows.push(...incoming.sourceRows);
+  existing.sourceSheetRows.push(...incoming.sourceSheetRows);
+  incoming.forecastValues.forEach((value, index) => {
+    existing.forecastValues[index] += value;
+  });
+  incoming.priceValues.forEach((value, index) => {
+    existing.priceValues[index] += value;
+  });
+  incoming.amountValues.forEach((value, index) => {
+    existing.amountValues[index] += value;
+  });
+  existing.country = existing.country ?? incoming.country;
+  existing.soldTo = existing.soldTo ?? incoming.soldTo;
+  existing.shipTo = existing.shipTo ?? incoming.shipTo;
+  existing.enduser = existing.enduser ?? incoming.enduser;
+  existing.plant = existing.plant ?? incoming.plant;
+  existing.materialCode = existing.materialCode ?? incoming.materialCode;
+  existing.onOff = existing.onOff ?? incoming.onOff;
+  existing.process = existing.process ?? incoming.process;
+  existing.application = existing.application ?? incoming.application;
+  existing.subApplication = existing.subApplication ?? incoming.subApplication;
+  existing.owner = existing.owner ?? incoming.owner;
+  existing.businessUnit = existing.businessUnit ?? incoming.businessUnit;
+}
+
 export type VersionedSheetParseResult = {
   sheetName: string;
   totalDataRows: number;
   forecastColumns: VersionedForecastColumn[];
+  hasPriceColumns: boolean;
+  hasAmountColumns: boolean;
   headerErrors: ImportHeaderError[];
   detectedHeaders: Array<{ index: number; name: string }>;
   missingKeyRows: Array<{ sourceSheet: string; sourceRow: number }>;
@@ -52,6 +81,8 @@ export type MergedVersionedSheetParseResult = {
   sheetNames: string[];
   totalDataRows: number;
   forecastColumns: VersionedForecastColumn[];
+  hasPriceColumns: boolean;
+  hasAmountColumns: boolean;
   headerErrors: ImportHeaderError[];
   detectedHeaders: Array<{ index: number; name: string }>;
   missingKeyRows: Array<{ sourceSheet: string; sourceRow: number }>;
@@ -70,8 +101,7 @@ function sheetHasVersionedImportLayout(sheet: XLSX.WorkSheet) {
   const header = rows[0] ?? [];
   if (normalizeHeader(header[0]) !== KEY_HEADER) return false;
   const qtyColumns = header.filter((value, index) => parseForecastMonthColumn(value, index) !== null);
-  const priceColumns = header.filter(value => /^P_/i.test(normalizeHeader(value)));
-  return qtyColumns.length > 0 && priceColumns.length > 0;
+  return qtyColumns.length > 0;
 }
 
 export function resolveVersionedImportSheets(workbook: XLSX.WorkBook) {
@@ -98,38 +128,16 @@ export function resolveVersionedImportSheets(workbook: XLSX.WorkBook) {
   return matched;
 }
 
-function buildVersionedForecastColumns(header: unknown[]): VersionedForecastColumn[] {
-  const qtyColumns = header
-    .map((value, index) => parseForecastMonthColumn(value, index))
-    .filter((column): column is NonNullable<typeof column> => column !== null);
-
-  const priceByMonth = new Map<string, { index: number; header: string }>();
-  const amountByMonth = new Map<string, { index: number; header: string }>();
-
-  header.forEach((value, index) => {
-    const parsed = parseMonthTokenFromPrefixedHeader(value);
-    if (!parsed) return;
-    const normalized = normalizeHeader(value);
-    if (/^P_/i.test(normalized)) {
-      priceByMonth.set(parsed.month, { index, header: parsed.header });
-    } else if (/^A_/i.test(normalized)) {
-      amountByMonth.set(parsed.month, { index, header: parsed.header });
-    }
-  });
-
-  return qtyColumns.map(qtyColumn => {
-    const price = priceByMonth.get(qtyColumn.month);
-    const amount = amountByMonth.get(qtyColumn.month);
-    return {
-      ...qtyColumn,
-      period: firstDayOfMonthPeriod(qtyColumn.month),
-      qtyIndex: qtyColumn.index,
-      priceIndex: price?.index ?? -1,
-      amountIndex: amount?.index ?? -1,
-      priceHeader: price?.header ?? '',
-      amountHeader: amount?.header ?? '',
-    };
-  });
+function buildVersionedForecastColumns(header: unknown[]): {
+  columns: VersionedForecastColumn[];
+  hasPriceColumns: boolean;
+  hasAmountColumns: boolean;
+} {
+  const { columns, hasPriceColumns, hasAmountColumns } = buildExtendedForecastColumns(
+    header,
+    firstDayOfMonthPeriod
+  );
+  return { columns, hasPriceColumns, hasAmountColumns };
 }
 
 export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkSheet): VersionedSheetParseResult {
@@ -147,7 +155,7 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
     index,
     name: normalizeHeader(value),
   }));
-  const forecastColumns = buildVersionedForecastColumns(header);
+  const { columns: forecastColumns, hasPriceColumns, hasAmountColumns } = buildVersionedForecastColumns(header);
   const businessUnitColumnIndex = findHeaderIndex(header, ['BU', 'Business Unit', 'BusinessUnit']);
 
   if (normalizeHeader(header[0]) !== KEY_HEADER) {
@@ -166,25 +174,6 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
       expected: 'At least one forecast month header in MMM-YY format',
       actual: 'No forecast month columns found',
     });
-  }
-
-  for (const column of forecastColumns) {
-    if (column.priceIndex < 0) {
-      headerErrors.push({
-        sourceSheet: sheetName,
-        column: '-',
-        expected: `Price column P_${column.header}`,
-        actual: 'Missing price column',
-      });
-    }
-    if (column.amountIndex < 0) {
-      headerErrors.push({
-        sourceSheet: sheetName,
-        column: '-',
-        expected: `Amount column A_${column.header}`,
-        actual: 'Missing amount column',
-      });
-    }
   }
 
   forecastColumns.sort((left, right) => left.month.localeCompare(right.month));
@@ -213,10 +202,11 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
 
   dataRows.forEach((row, index) => {
     const sourceRow = index + 2;
-    const key = normalizeKey(row[0]);
-    if (!key) {
+    const rawKey = normalizeKey(row[0]);
+    const keyMissing = !rawKey;
+    const key = rawKey || buildSyntheticImportKey(sheetName, sourceRow);
+    if (keyMissing) {
       missingKeyRows.push({ sourceSheet: sheetName, sourceRow });
-      return;
     }
 
     const group = excelGroups.get(key) ?? {
@@ -263,28 +253,25 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
       const qtyRaw = row[forecastColumn.qtyIndex];
       const qtyParsed = parseForecastNumber(qtyRaw);
       if (!qtyParsed.ok) {
-        group.hasInvalidNumber = true;
         pushInvalid(sourceRow, key, forecastColumn.col, forecastColumn.header, qtyRaw);
       } else {
         group.forecastValues[forecastIndex] += qtyParsed.value;
       }
 
-      if (forecastColumn.priceIndex >= 0) {
+      if (hasPriceColumns && forecastColumn.priceIndex >= 0) {
         const priceRaw = row[forecastColumn.priceIndex];
         const priceParsed = parseForecastNumber(priceRaw);
         if (!priceParsed.ok) {
-          group.hasInvalidNumber = true;
           pushInvalid(sourceRow, key, XLSX.utils.encode_col(forecastColumn.priceIndex), forecastColumn.priceHeader, priceRaw);
         } else {
           group.priceValues[forecastIndex] += priceParsed.value;
         }
       }
 
-      if (forecastColumn.amountIndex >= 0) {
+      if (hasAmountColumns && forecastColumn.amountIndex >= 0) {
         const amountRaw = row[forecastColumn.amountIndex];
         const amountParsed = parseForecastNumber(amountRaw);
         if (!amountParsed.ok) {
-          group.hasInvalidNumber = true;
           pushInvalid(sourceRow, key, XLSX.utils.encode_col(forecastColumn.amountIndex), forecastColumn.amountHeader, amountRaw);
         } else {
           group.amountValues[forecastIndex] += amountParsed.value;
@@ -299,6 +286,8 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
     sheetName,
     totalDataRows: dataRows.length,
     forecastColumns,
+    hasPriceColumns,
+    hasAmountColumns,
     headerErrors,
     detectedHeaders,
     missingKeyRows,
@@ -313,6 +302,8 @@ export function mergeVersionedSheetResults(sheetResults: VersionedSheetParseResu
       sheetNames: [],
       totalDataRows: 0,
       forecastColumns: [],
+      hasPriceColumns: false,
+      hasAmountColumns: false,
       headerErrors: [],
       detectedHeaders: [],
       missingKeyRows: [],
@@ -343,7 +334,6 @@ export function mergeVersionedSheetResults(sheetResults: VersionedSheetParseResu
   const invalidNumericValues = sheetResults.flatMap(result => result.invalidNumericValues);
   const excelGroups = new Map<string, ExcelVersionedGroup>();
   const crossSheetDuplicateKeys: VersionedCrossSheetDuplicateKey[] = [];
-  const crossSheetBlockedKeys = new Set<string>();
 
   for (const result of sheetResults) {
     for (const group of result.excelGroups.values()) {
@@ -363,55 +353,27 @@ export function mergeVersionedSheetResults(sheetResults: VersionedSheetParseResu
       const incomingSheet = result.sheetName;
       const existingSheets = new Set(existing.sourceSheetRows.map(entry => entry.sourceSheet));
       if (!existingSheets.has(incomingSheet)) {
-        if (!crossSheetBlockedKeys.has(group.keyNoRegist)) {
-          crossSheetBlockedKeys.add(group.keyNoRegist);
-          crossSheetDuplicateKeys.push({
+        let crossEntry = crossSheetDuplicateKeys.find(item => item.excelKeyForNoRegist === group.keyNoRegist);
+        if (!crossEntry) {
+          crossEntry = {
             excelKeyForNoRegist: group.keyNoRegist,
-            entries: [...existing.sourceSheetRows, ...group.sourceSheetRows],
-          });
-        } else {
-          const crossEntry = crossSheetDuplicateKeys.find(item => item.excelKeyForNoRegist === group.keyNoRegist);
-          crossEntry?.entries.push(...group.sourceSheetRows);
+            entries: [...existing.sourceSheetRows],
+          };
+          crossSheetDuplicateKeys.push(crossEntry);
         }
-        excelGroups.delete(group.keyNoRegist);
-        continue;
+        crossEntry.entries.push(...group.sourceSheetRows);
       }
 
-      existing.sourceRows.push(...group.sourceRows);
-      existing.sourceSheetRows.push(...group.sourceSheetRows);
-      group.forecastValues.forEach((value, index) => {
-        existing.forecastValues[index] += value;
-      });
-      group.priceValues.forEach((value, index) => {
-        existing.priceValues[index] += value;
-      });
-      group.amountValues.forEach((value, index) => {
-        existing.amountValues[index] += value;
-      });
-      existing.hasInvalidNumber = existing.hasInvalidNumber || group.hasInvalidNumber;
-      existing.country = existing.country ?? group.country;
-      existing.soldTo = existing.soldTo ?? group.soldTo;
-      existing.shipTo = existing.shipTo ?? group.shipTo;
-      existing.enduser = existing.enduser ?? group.enduser;
-      existing.plant = existing.plant ?? group.plant;
-      existing.materialCode = existing.materialCode ?? group.materialCode;
-      existing.onOff = existing.onOff ?? group.onOff;
-      existing.process = existing.process ?? group.process;
-      existing.application = existing.application ?? group.application;
-      existing.subApplication = existing.subApplication ?? group.subApplication;
-      existing.owner = existing.owner ?? group.owner;
-      existing.businessUnit = existing.businessUnit ?? group.businessUnit;
+      mergeExcelGroups(existing, group);
     }
-  }
-
-  for (const key of crossSheetBlockedKeys) {
-    excelGroups.delete(key);
   }
 
   return {
     sheetNames,
     totalDataRows: sheetResults.reduce((sum, result) => sum + result.totalDataRows, 0),
     forecastColumns: canonical.forecastColumns,
+    hasPriceColumns: sheetResults.some(result => result.hasPriceColumns),
+    hasAmountColumns: sheetResults.some(result => result.hasAmountColumns),
     headerErrors,
     detectedHeaders: canonical.detectedHeaders,
     missingKeyRows,

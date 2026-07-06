@@ -82,6 +82,8 @@ export const DEFAULT_VISIBLE_COLUMN_KEYS: RegColumnKey[] = [
   'ownerName',
   'businessUnit',
   'registrationTopic',
+  'shipToCode',
+  'endUserCode',
   'materialCode',
   'materialDescription',
   'inventoryA0Qty',

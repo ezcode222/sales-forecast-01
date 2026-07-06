@@ -16,8 +16,14 @@ export function readExcelVersionLabel(workbook: XLSX.WorkBook): string | null {
   return label || null;
 }
 
+function isCurrentForecastVersionLabel(label: string) {
+  const normalized = label.trim().toLowerCase().replace(/\s+/g, ' ');
+  return normalized === 'current' || normalized === 'current forecast';
+}
+
 export function detectImportFormat(workbook: XLSX.WorkBook): ImportMode {
   const versionLabel = readExcelVersionLabel(workbook);
-  if (versionLabel) return 'versioned';
-  return 'current_forecast';
+  if (!versionLabel) return 'current_forecast';
+  if (isCurrentForecastVersionLabel(versionLabel)) return 'current_forecast';
+  return 'versioned';
 }
