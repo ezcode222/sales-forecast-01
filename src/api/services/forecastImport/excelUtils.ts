@@ -2,12 +2,21 @@ import * as XLSX from 'xlsx';
 import { KEY_HEADER, MONTH_INDEX_BY_ABBREVIATION } from './constants';
 import type { ForecastImportColumn } from './types';
 
+export function unknownToDisplayString(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  return '';
+}
+
 export function normalizeHeader(value: unknown) {
-  return String(value ?? '').trim();
+  return unknownToDisplayString(value).trim();
 }
 
 export function normalizeKey(value: unknown) {
-  return String(value ?? '').trim();
+  return unknownToDisplayString(value).trim();
 }
 
 export const SYNTHETIC_IMPORT_KEY_PREFIX = '__IMPORT__';
@@ -109,7 +118,8 @@ export function parseForecastNumber(value: unknown) {
   if (typeof value === 'number') {
     return Number.isFinite(value) && value >= 0 ? { ok: true as const, value } : { ok: false as const };
   }
-  const text = String(value).trim();
+  if (typeof value !== 'string') return { ok: false as const };
+  const text = value.trim();
   if (text === '') return { ok: true as const, value: 0 };
   const normalized = text.replaceAll(',', '');
   const parsed = Number(normalized);
@@ -117,7 +127,7 @@ export function parseForecastNumber(value: unknown) {
 }
 
 export function forecastNumberInvalidReason(value: unknown) {
-  const text = String(value ?? '').trim().replaceAll(',', '');
+  const text = unknownToDisplayString(value).trim().replaceAll(',', '');
   if (text === '') return 'Not a valid number';
   const parsed = Number(text);
   if (Number.isFinite(parsed) && parsed < 0) return 'Negative numbers are not allowed';

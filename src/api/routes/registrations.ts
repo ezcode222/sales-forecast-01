@@ -286,16 +286,45 @@ export function normalizeRegistrationFilters(value: unknown): RegistrationFilter
       .filter(([key, values]) => filterColumns[key] && Array.isArray(values))
       .map(([key, values]) => [
         key,
-        (values as unknown[]).map(item => String(item).trim()).filter(Boolean).slice(0, 200),
+        (values as unknown[]).map(item => scalarToString(item)).filter(Boolean).slice(0, 200),
       ])
       .filter(([, values]) => values.length > 0)
   );
 }
 
+function scalarToString(value: unknown) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value).trim();
+  }
+  return '';
+}
+
+function isStripCharacter(code: number) {
+  return code <= 0x1f
+    || code === 0x7f
+    || (code >= 0x80 && code <= 0x9f)
+    || code === 0xa0
+    || code === 0x200b
+    || code === 0x200c
+    || code === 0x200d
+    || code === 0xfeff;
+}
+
+function stripFormattingCharacters(text: string) {
+  let result = '';
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (!isStripCharacter(code)) {
+      result += char;
+    }
+  }
+  return result.trim();
+}
+
 function normalizeFilterOptionValue(value: unknown) {
-  return String(value ?? '')
-    .replace(/[\u0000-\u001F\u007F-\u009F\u00A0\u200B-\u200D\uFEFF]/g, '')
-    .trim();
+  return stripFormattingCharacters(scalarToString(value));
 }
 
 function dedupeFilterOptionValues(values: string[]) {
@@ -310,13 +339,6 @@ function dedupeFilterOptionValues(values: string[]) {
     items.push(normalized);
   }
   return items;
-}
-
-function scalarToString(value: unknown) {
-  if (typeof value === 'string' || typeof value === 'number') {
-    return String(value).trim();
-  }
-  return '';
 }
 
 function mapRegistrationRow(row: Record<string, unknown>) {
@@ -371,7 +393,7 @@ function mapRegistrationRow(row: Record<string, unknown>) {
     endUserName: String(row.EndUserName ?? row.endUserName ?? ''),
     productName: String(row.ProductName ?? row.productName ?? ''),
     column1: String(row.NewKey ?? row.newKey ?? ''),
-    createdBy: String(row.CreatedBy ?? row.createdBy ?? ''),
+    createdBy: scalarToString(row.CreatedBy ?? row.createdBy),
     carryInETD: 0,
     carryOutETD: 0,
     carryInLoading: 0,

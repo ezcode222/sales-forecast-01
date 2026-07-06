@@ -18,6 +18,7 @@ import {
   chunkArray,
   getOnOffFromKey,
   primarySourceEntry,
+  unknownToDisplayString,
 } from './excelUtils';
 import {
   diagnoseUnmatchedRows,
@@ -266,7 +267,7 @@ export async function buildVersionedImportPreview(
       );
       const reason = invalids.length > 0
         ? invalids
-          .map(item => `Invalid number in ${item.header} (col ${item.column}): "${String(item.value ?? '')}"`)
+          .map(item => `Invalid number in ${item.header} (col ${item.column}): "${unknownToDisplayString(item.value)}"`)
           .join('; ')
         : 'Invalid forecast number in one or more month columns';
       const primary = primarySourceEntry(group);

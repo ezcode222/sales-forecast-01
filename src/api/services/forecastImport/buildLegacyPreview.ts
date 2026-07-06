@@ -7,7 +7,7 @@ import {
 import type { CurrentForecastImportPreview } from '../../../lib/api';
 import { businessUnitFromPlantCode } from '../businessUnit';
 import { CURRENT_FORECAST_VERSION, LEGACY_PREVIEW_CONTRACT_VERSION, PREVIEW_IMPORTABLE_SAMPLE_SIZE, PREVIEW_OVERWRITE_SAMPLE_SIZE, PREVIEW_UNIFIED_ROWS_SAMPLE_SIZE, PREVIEW_UNMATCHED_ROWS_SAMPLE_SIZE } from './constants';
-import { getOnOffFromKey, primarySourceEntry } from './excelUtils';
+import { getOnOffFromKey, primarySourceEntry, unknownToDisplayString } from './excelUtils';
 import {
   mergeLegacySheetResults,
   parseLegacyImportSheet,
@@ -94,7 +94,7 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
       );
       const reason = invalids.length > 0
         ? invalids
-          .map(item => `Invalid number in ${item.header} (col ${item.column}): "${String(item.value ?? '')}"`)
+          .map(item => `Invalid number in ${item.header} (col ${item.column}): "${unknownToDisplayString(item.value)}"`)
           .join('; ')
         : 'Invalid forecast number in one or more month columns';
       const primary = primarySourceEntry(group);

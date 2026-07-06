@@ -144,8 +144,6 @@ export type ExcelForecastGroup = {
   hasInvalidNumber: boolean;
 };
 
-export type ExcelVersionedGroup = ExcelForecastGroup;
-
 export type ImportHeaderError = {
   sourceSheet: string;
   column: string;

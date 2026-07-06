@@ -3,7 +3,7 @@ import { clearActualCaches } from '../../routes/actuals';
 import { clearForecastSummaryCache } from '../../routes/forecast';
 import { businessUnitFromPlantCode } from '../businessUnit';
 import { getActiveSnapshotVersion } from '../dataSnapshot';
-import { normalizeKey, primarySourceEntry } from './excelUtils';
+import { normalizeKey, primarySourceEntry, unknownToDisplayString } from './excelUtils';
 import { detectEmptyKeySegments, parseExcelKey } from './keyDiagnostics';
 import type {
   AutoCreateRegistrationPackage,
@@ -28,7 +28,7 @@ function hasValidSixSegmentKey(rawKey: string) {
 }
 
 function text(value: unknown) {
-  return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+  return unknownToDisplayString(value).trim();
 }
 
 function nullableText(value: unknown) {
@@ -153,7 +153,7 @@ async function findDuplicateRegistration(rawExcelKey: string, newKey: string, ke
     }),
   ]);
   if (managedByRaw) return { source: 'master_data' as const, id: managedByRaw.id };
-  if (crmRows.length > 0) return { source: 'crm' as const, id: String(crmRows[0].id) };
+  if (crmRows.length > 0) return { source: 'crm' as const, id: unknownToDisplayString(crmRows[0].id) };
   if (managed) return { source: 'master_data' as const, id: managed.id };
   return null;
 }

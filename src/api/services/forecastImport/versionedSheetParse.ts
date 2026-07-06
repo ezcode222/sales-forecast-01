@@ -19,13 +19,13 @@ import {
   parseForecastNumber,
 } from './excelUtils';
 import type {
-  ExcelVersionedGroup,
+  ExcelForecastGroup,
   ImportHeaderError,
   SourceSheetRow,
   VersionedForecastColumn,
 } from './types';
 
-function mergeExcelGroups(existing: ExcelVersionedGroup, incoming: ExcelVersionedGroup) {
+function mergeExcelGroups(existing: ExcelForecastGroup, incoming: ExcelForecastGroup) {
   existing.sourceRows.push(...incoming.sourceRows);
   existing.sourceSheetRows.push(...incoming.sourceSheetRows);
   incoming.forecastValues.forEach((value, index) => {
@@ -69,7 +69,7 @@ export type VersionedSheetParseResult = {
     value: unknown;
     reason: string;
   }>;
-  excelGroups: Map<string, ExcelVersionedGroup>;
+  excelGroups: Map<string, ExcelForecastGroup>;
 };
 
 export type VersionedCrossSheetDuplicateKey = {
@@ -87,7 +87,7 @@ export type MergedVersionedSheetParseResult = {
   detectedHeaders: Array<{ index: number; name: string }>;
   missingKeyRows: Array<{ sourceSheet: string; sourceRow: number }>;
   invalidNumericValues: VersionedSheetParseResult['invalidNumericValues'];
-  excelGroups: Map<string, ExcelVersionedGroup>;
+  excelGroups: Map<string, ExcelForecastGroup>;
   crossSheetDuplicateKeys: VersionedCrossSheetDuplicateKey[];
 };
 
@@ -178,7 +178,7 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
 
   forecastColumns.sort((left, right) => left.month.localeCompare(right.month));
 
-  const excelGroups = new Map<string, ExcelVersionedGroup>();
+  const excelGroups = new Map<string, ExcelForecastGroup>();
   const missingKeyRows: Array<{ sourceSheet: string; sourceRow: number }> = [];
   const invalidNumericValues: VersionedSheetParseResult['invalidNumericValues'] = [];
 
@@ -252,29 +252,29 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
     forecastColumns.forEach((forecastColumn, forecastIndex) => {
       const qtyRaw = row[forecastColumn.qtyIndex];
       const qtyParsed = parseForecastNumber(qtyRaw);
-      if (!qtyParsed.ok) {
-        pushInvalid(sourceRow, key, forecastColumn.col, forecastColumn.header, qtyRaw);
-      } else {
+      if (qtyParsed.ok) {
         group.forecastValues[forecastIndex] += qtyParsed.value;
+      } else {
+        pushInvalid(sourceRow, key, forecastColumn.col, forecastColumn.header, qtyRaw);
       }
 
       if (hasPriceColumns && forecastColumn.priceIndex >= 0) {
         const priceRaw = row[forecastColumn.priceIndex];
         const priceParsed = parseForecastNumber(priceRaw);
-        if (!priceParsed.ok) {
-          pushInvalid(sourceRow, key, XLSX.utils.encode_col(forecastColumn.priceIndex), forecastColumn.priceHeader, priceRaw);
-        } else {
+        if (priceParsed.ok) {
           group.priceValues[forecastIndex] += priceParsed.value;
+        } else {
+          pushInvalid(sourceRow, key, XLSX.utils.encode_col(forecastColumn.priceIndex), forecastColumn.priceHeader, priceRaw);
         }
       }
 
       if (hasAmountColumns && forecastColumn.amountIndex >= 0) {
         const amountRaw = row[forecastColumn.amountIndex];
         const amountParsed = parseForecastNumber(amountRaw);
-        if (!amountParsed.ok) {
-          pushInvalid(sourceRow, key, XLSX.utils.encode_col(forecastColumn.amountIndex), forecastColumn.amountHeader, amountRaw);
-        } else {
+        if (amountParsed.ok) {
           group.amountValues[forecastIndex] += amountParsed.value;
+        } else {
+          pushInvalid(sourceRow, key, XLSX.utils.encode_col(forecastColumn.amountIndex), forecastColumn.amountHeader, amountRaw);
         }
       }
     });
@@ -332,7 +332,7 @@ export function mergeVersionedSheetResults(sheetResults: VersionedSheetParseResu
 
   const missingKeyRows = sheetResults.flatMap(result => result.missingKeyRows);
   const invalidNumericValues = sheetResults.flatMap(result => result.invalidNumericValues);
-  const excelGroups = new Map<string, ExcelVersionedGroup>();
+  const excelGroups = new Map<string, ExcelForecastGroup>();
   const crossSheetDuplicateKeys: VersionedCrossSheetDuplicateKey[] = [];
 
   for (const result of sheetResults) {

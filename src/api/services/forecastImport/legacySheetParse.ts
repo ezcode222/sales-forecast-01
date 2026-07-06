@@ -246,7 +246,9 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
     extendedColumns.forEach((forecastColumn, forecastIndex) => {
       const qtyRaw = row[forecastColumn.qtyIndex];
       const qtyParsed = parseForecastNumber(qtyRaw);
-      if (!qtyParsed.ok) {
+      if (qtyParsed.ok) {
+        group.forecastValues[forecastIndex] += qtyParsed.value;
+      } else {
         invalidNumericValues.push({
           sourceSheet: sheetName,
           sourceRow,
@@ -256,14 +258,14 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
           value: qtyRaw,
           reason: forecastNumberInvalidReason(qtyRaw),
         });
-      } else {
-        group.forecastValues[forecastIndex] += qtyParsed.value;
       }
 
       if (hasPriceColumns && forecastColumn.priceIndex >= 0) {
         const priceRaw = row[forecastColumn.priceIndex];
         const priceParsed = parseForecastNumber(priceRaw);
-        if (!priceParsed.ok) {
+        if (priceParsed.ok) {
+          group.priceValues[forecastIndex] += priceParsed.value;
+        } else {
           invalidNumericValues.push({
             sourceSheet: sheetName,
             sourceRow,
@@ -273,15 +275,15 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
             value: priceRaw,
             reason: forecastNumberInvalidReason(priceRaw),
           });
-        } else {
-          group.priceValues[forecastIndex] += priceParsed.value;
         }
       }
 
       if (hasAmountColumns && forecastColumn.amountIndex >= 0) {
         const amountRaw = row[forecastColumn.amountIndex];
         const amountParsed = parseForecastNumber(amountRaw);
-        if (!amountParsed.ok) {
+        if (amountParsed.ok) {
+          group.amountValues[forecastIndex] += amountParsed.value;
+        } else {
           invalidNumericValues.push({
             sourceSheet: sheetName,
             sourceRow,
@@ -291,8 +293,6 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
             value: amountRaw,
             reason: forecastNumberInvalidReason(amountRaw),
           });
-        } else {
-          group.amountValues[forecastIndex] += amountParsed.value;
         }
       }
     });

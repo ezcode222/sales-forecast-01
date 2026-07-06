@@ -23,6 +23,21 @@ import type {
   ConfirmVersionedImportRecord,
 } from './types';
 
+type ImportColumnFlags = {
+  hasPriceColumns: boolean;
+  hasAmountColumns: boolean;
+};
+
+const LEGACY_IMPORT_COLUMN_FLAGS: ImportColumnFlags = {
+  hasPriceColumns: false,
+  hasAmountColumns: false,
+};
+
+const VERSIONED_IMPORT_COLUMN_FLAGS: ImportColumnFlags = {
+  hasPriceColumns: true,
+  hasAmountColumns: true,
+};
+
 export {
   CURRENT_FORECAST_VERSION,
   LEGACY_PREVIEW_CONTRACT_VERSION,
@@ -301,10 +316,7 @@ export async function confirmLegacyImport(
   records: ConfirmLegacyImportRecord[],
   changedBy: string,
   stampPeriod: unknown,
-  columnFlags: { hasPriceColumns: boolean; hasAmountColumns: boolean } = {
-    hasPriceColumns: false,
-    hasAmountColumns: false,
-  }
+  columnFlags: ImportColumnFlags = LEGACY_IMPORT_COLUMN_FLAGS,
 ): Promise<ForecastImportConfirmResult> {
   const parsedRecords = parseLegacyRecords(records);
   const normalizedChangedBy = normalizeChangedBy(changedBy);
@@ -463,10 +475,7 @@ export async function confirmVersionedImport(
   targetVersion: string,
   changedBy: string,
   stampPeriod: unknown,
-  columnFlags: { hasPriceColumns: boolean; hasAmountColumns: boolean } = {
-    hasPriceColumns: true,
-    hasAmountColumns: true,
-  }
+  columnFlags: ImportColumnFlags = VERSIONED_IMPORT_COLUMN_FLAGS,
 ): Promise<ForecastImportConfirmResult> {
   const parsedRecords = parseVersionedRecords(records);
   const versionName = normalizeKey(targetVersion);
