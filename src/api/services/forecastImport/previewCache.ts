@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  AutoCreateRegistrationPackage,
   ConfirmLegacyImportRecord,
   ConfirmVersionedImportRecord,
   ImportMode,
@@ -19,6 +20,7 @@ export type CachedPreviewPayload = {
   versionedHasPriceColumns?: boolean;
   versionedHasAmountColumns?: boolean;
   amountMismatchCount: number;
+  autoCreateCandidates?: AutoCreateRegistrationPackage[];
   expiresAt: number;
 };
 

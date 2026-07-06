@@ -11,6 +11,7 @@ import {
   firstWednesdayPeriod,
   forecastColumnSignature,
   forecastNumberInvalidReason,
+  buildSyntheticImportKey,
   getOnOffFromKey,
   normalizeHeader,
   normalizeKey,
@@ -25,6 +26,32 @@ import type {
   ImportHeaderError,
   SourceSheetRow,
 } from './types';
+
+function mergeExcelGroups(existing: ExcelForecastGroup, incoming: ExcelForecastGroup) {
+  existing.sourceRows.push(...incoming.sourceRows);
+  existing.sourceSheetRows.push(...incoming.sourceSheetRows);
+  incoming.forecastValues.forEach((value, index) => {
+    existing.forecastValues[index] += value;
+  });
+  incoming.priceValues.forEach((value, index) => {
+    existing.priceValues[index] += value;
+  });
+  incoming.amountValues.forEach((value, index) => {
+    existing.amountValues[index] += value;
+  });
+  existing.country = existing.country ?? incoming.country;
+  existing.soldTo = existing.soldTo ?? incoming.soldTo;
+  existing.shipTo = existing.shipTo ?? incoming.shipTo;
+  existing.enduser = existing.enduser ?? incoming.enduser;
+  existing.plant = existing.plant ?? incoming.plant;
+  existing.materialCode = existing.materialCode ?? incoming.materialCode;
+  existing.onOff = existing.onOff ?? incoming.onOff;
+  existing.process = existing.process ?? incoming.process;
+  existing.application = existing.application ?? incoming.application;
+  existing.subApplication = existing.subApplication ?? incoming.subApplication;
+  existing.owner = existing.owner ?? incoming.owner;
+  existing.businessUnit = existing.businessUnit ?? incoming.businessUnit;
+}
 
 export type SheetParseResult = {
   sheetName: string;
@@ -169,10 +196,11 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
 
   dataRows.forEach((row, index) => {
     const sourceRow = index + 2;
-    const key = normalizeKey(row[0]);
-    if (!key) {
+    const rawKey = normalizeKey(row[0]);
+    const keyMissing = !rawKey;
+    const key = rawKey || buildSyntheticImportKey(sheetName, sourceRow);
+    if (keyMissing) {
       missingKeyRows.push({ sourceSheet: sheetName, sourceRow });
-      return;
     }
 
     const group = excelGroups.get(key) ?? {
@@ -219,7 +247,6 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
       const qtyRaw = row[forecastColumn.qtyIndex];
       const qtyParsed = parseForecastNumber(qtyRaw);
       if (!qtyParsed.ok) {
-        group.hasInvalidNumber = true;
         invalidNumericValues.push({
           sourceSheet: sheetName,
           sourceRow,
@@ -237,7 +264,6 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
         const priceRaw = row[forecastColumn.priceIndex];
         const priceParsed = parseForecastNumber(priceRaw);
         if (!priceParsed.ok) {
-          group.hasInvalidNumber = true;
           invalidNumericValues.push({
             sourceSheet: sheetName,
             sourceRow,
@@ -256,7 +282,6 @@ export function parseLegacyImportSheet(sheetName: string, sheet: XLSX.WorkSheet)
         const amountRaw = row[forecastColumn.amountIndex];
         const amountParsed = parseForecastNumber(amountRaw);
         if (!amountParsed.ok) {
-          group.hasInvalidNumber = true;
           invalidNumericValues.push({
             sourceSheet: sheetName,
             sourceRow,
@@ -329,7 +354,6 @@ export function mergeLegacySheetResults(sheetResults: SheetParseResult[]): Merge
   const invalidNumericValues = sheetResults.flatMap(result => result.invalidNumericValues);
   const excelGroups = new Map<string, ExcelForecastGroup>();
   const crossSheetDuplicateKeys: CrossSheetDuplicateKey[] = [];
-  const crossSheetBlockedKeys = new Set<string>();
 
   for (const result of sheetResults) {
     for (const group of result.excelGroups.values()) {
@@ -349,49 +373,19 @@ export function mergeLegacySheetResults(sheetResults: SheetParseResult[]): Merge
       const incomingSheet = result.sheetName;
       const existingSheets = new Set(existing.sourceSheetRows.map(entry => entry.sourceSheet));
       if (!existingSheets.has(incomingSheet)) {
-        if (!crossSheetBlockedKeys.has(group.keyNoRegist)) {
-          crossSheetBlockedKeys.add(group.keyNoRegist);
-          crossSheetDuplicateKeys.push({
+        let crossEntry = crossSheetDuplicateKeys.find(item => item.excelKeyForNoRegist === group.keyNoRegist);
+        if (!crossEntry) {
+          crossEntry = {
             excelKeyForNoRegist: group.keyNoRegist,
-            entries: [...existing.sourceSheetRows, ...group.sourceSheetRows],
-          });
-        } else {
-          const crossEntry = crossSheetDuplicateKeys.find(item => item.excelKeyForNoRegist === group.keyNoRegist);
-          crossEntry?.entries.push(...group.sourceSheetRows);
+            entries: [...existing.sourceSheetRows],
+          };
+          crossSheetDuplicateKeys.push(crossEntry);
         }
-        excelGroups.delete(group.keyNoRegist);
-        continue;
+        crossEntry.entries.push(...group.sourceSheetRows);
       }
 
-      existing.sourceRows.push(...group.sourceRows);
-      existing.sourceSheetRows.push(...group.sourceSheetRows);
-      group.forecastValues.forEach((value, index) => {
-        existing.forecastValues[index] += value;
-      });
-      group.priceValues.forEach((value, index) => {
-        existing.priceValues[index] += value;
-      });
-      group.amountValues.forEach((value, index) => {
-        existing.amountValues[index] += value;
-      });
-      existing.hasInvalidNumber = existing.hasInvalidNumber || group.hasInvalidNumber;
-      existing.country = existing.country ?? group.country;
-      existing.soldTo = existing.soldTo ?? group.soldTo;
-      existing.shipTo = existing.shipTo ?? group.shipTo;
-      existing.enduser = existing.enduser ?? group.enduser;
-      existing.plant = existing.plant ?? group.plant;
-      existing.materialCode = existing.materialCode ?? group.materialCode;
-      existing.onOff = existing.onOff ?? group.onOff;
-      existing.process = existing.process ?? group.process;
-      existing.application = existing.application ?? group.application;
-      existing.subApplication = existing.subApplication ?? group.subApplication;
-      existing.owner = existing.owner ?? group.owner;
-      existing.businessUnit = existing.businessUnit ?? group.businessUnit;
+      mergeExcelGroups(existing, group);
     }
-  }
-
-  for (const key of crossSheetBlockedKeys) {
-    excelGroups.delete(key);
   }
 
   return {

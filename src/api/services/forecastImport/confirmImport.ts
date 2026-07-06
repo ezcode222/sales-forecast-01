@@ -35,6 +35,8 @@ export type ForecastImportConfirmResult = {
   created: number;
   overwritten: number;
   version: string;
+  registrationsCreated: number;
+  createdRegistrationIds: string[];
 };
 
 export class ForecastImportConfirmError extends Error {
@@ -290,6 +292,8 @@ function buildImportResult(
     created: records.length - overwritten,
     overwritten,
     version,
+    registrationsCreated: 0,
+    createdRegistrationIds: [],
   };
 }
 
@@ -423,11 +427,11 @@ export async function confirmLegacyImport(
             oldPriceFcst: existing?.priceFcst ?? null,
             newPriceFcst: columnFlags.hasPriceColumns
               ? record.priceFcst
-              : (existing?.priceFcst ?? null),
+              : (existing?.priceFcst ?? 0),
             oldAmountFcst: existing?.amountFcst ?? null,
             newAmountFcst: columnFlags.hasAmountColumns
               ? record.amountFcst
-              : (existing?.amountFcst ?? null),
+              : (existing?.amountFcst ?? 0),
           };
         }),
       });
@@ -599,11 +603,11 @@ export async function confirmVersionedImport(
             oldPriceFcst: existing?.priceFcst ?? null,
             newPriceFcst: columnFlags.hasPriceColumns
               ? record.priceFcst
-              : (existing?.priceFcst ?? null),
+              : (existing?.priceFcst ?? 0),
             oldAmountFcst: existing?.amountFcst ?? null,
             newAmountFcst: columnFlags.hasAmountColumns
               ? record.amountFcst
-              : (existing?.amountFcst ?? null),
+              : (existing?.amountFcst ?? 0),
           };
         }),
       });

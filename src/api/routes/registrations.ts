@@ -9,6 +9,15 @@ const router = Router();
 const DEFAULT_PAGE_SIZE = 80;
 const MAX_PAGE_SIZE = 200;
 
+function normalizedFilterColumnSql(column: Prisma.Sql) {
+  return Prisma.sql`LTRIM(RTRIM(REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(4000), ${column}), CHAR(9), ''), CHAR(10), ''), CHAR(13), ''), CHAR(160), '')))`;
+}
+
+function hasMeaningfulFilterValueSql(column: Prisma.Sql) {
+  const normalized = normalizedFilterColumnSql(column);
+  return Prisma.sql`${column} IS NOT NULL AND NULLIF(${normalized}, '') IS NOT NULL`;
+}
+
 const managedRegistrationSourceSql = Prisma.sql`
   SELECT
     r.newKey AS NewKey, r.id AS RegistrationId, r.keyForNoCRM AS KeyforNoCRM,
@@ -31,7 +40,8 @@ const managedRegistrationSourceSql = Prisma.sql`
     r.plantName AS PlantName, r.countryCode AS CountryCode, r.endUserCode AS EndUserCode,
     r.endUserExportControl AS EndUserExportControl, r.endUserName AS EndUserName,
     r.productName AS ProductName, r.priceFormula AS PriceFormula, r.spread AS Spread,
-    r.businessUnit AS BusinessUnit, CAST(1 AS BIT) AS IsManaged
+    r.businessUnit AS BusinessUnit, r.createdBy AS CreatedBy,
+    CAST(1 AS BIT) AS IsManaged
   FROM dbo.master_data_crm_registrations r
   WHERE r.mainRegist = 1
 `;
@@ -63,6 +73,7 @@ export async function getRegistrationSourceSql() {
         r.endUserExportControl AS EndUserExportControl, r.endUserName AS EndUserName,
         r.productName AS ProductName, CAST('' AS NVARCHAR(50)) AS PriceFormula,
         CAST(0 AS DECIMAL(18,4)) AS Spread, r.businessUnit AS BusinessUnit,
+        CAST('' AS NVARCHAR(100)) AS CreatedBy,
         CAST(0 AS BIT) AS IsManaged
       FROM dbo.crm_registration_snapshot r
       WHERE r.snapshotVersion = ${snapshotVersion}
@@ -94,6 +105,7 @@ export async function getRegistrationSourceSql() {
     CAST('' AS NVARCHAR(50)) AS PriceFormula,
     CAST(0 AS DECIMAL(18,4)) AS Spread,
     ${directCrmBusinessUnitSql},
+    CAST('' AS NVARCHAR(100)) AS CreatedBy,
     CAST(0 AS BIT) AS IsManaged
   FROM [dbo].[VW_CRM_RegistrationAll_1] r
   WHERE r.NewKey IS NOT NULL AND r.MainRegist = 1
@@ -280,6 +292,26 @@ export function normalizeRegistrationFilters(value: unknown): RegistrationFilter
   );
 }
 
+function normalizeFilterOptionValue(value: unknown) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001F\u007F-\u009F\u00A0\u200B-\u200D\uFEFF]/g, '')
+    .trim();
+}
+
+function dedupeFilterOptionValues(values: string[]) {
+  const seen = new Set<string>();
+  const items: string[] = [];
+  for (const value of values) {
+    const normalized = normalizeFilterOptionValue(value);
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(normalized);
+  }
+  return items;
+}
+
 function scalarToString(value: unknown) {
   if (typeof value === 'string' || typeof value === 'number') {
     return String(value).trim();
@@ -339,6 +371,7 @@ function mapRegistrationRow(row: Record<string, unknown>) {
     endUserName: String(row.EndUserName ?? row.endUserName ?? ''),
     productName: String(row.ProductName ?? row.productName ?? ''),
     column1: String(row.NewKey ?? row.newKey ?? ''),
+    createdBy: String(row.CreatedBy ?? row.createdBy ?? ''),
     carryInETD: 0,
     carryOutETD: 0,
     carryInLoading: 0,
@@ -469,10 +502,9 @@ router.get('/filter-options', async (req, res) => {
     const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
       WITH registration_source AS (${registrationSourceSql}),
       filter_values AS (
-        SELECT DISTINCT CONVERT(NVARCHAR(4000), ${column}) AS value
+        SELECT DISTINCT ${normalizedFilterColumnSql(column)} AS value
         FROM registration_source r
-        WHERE ${column} IS NOT NULL
-          AND LTRIM(RTRIM(CONVERT(NVARCHAR(4000), ${column}))) <> ''
+        WHERE ${hasMeaningfulFilterValueSql(column)}
           ${otherFilters}
           ${searchFilter}
       )
@@ -481,7 +513,7 @@ router.get('/filter-options', async (req, res) => {
       ${cursorFilter}
       ORDER BY value
     `;
-    const values = rows.map(row => String(row.value));
+    const values = dedupeFilterOptionValues(rows.map(row => String(row.value)));
     const items = values.slice(0, pageSize);
     res.json({
       items,

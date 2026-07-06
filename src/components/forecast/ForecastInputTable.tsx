@@ -295,8 +295,11 @@ function ForecastInputTableComponent({
       const versionNote = isVersionedImportPreview(importPreview)
         ? ` View switched to ${targetVersion}.`
         : '';
+      const registrationsNote = (result.registrationsCreated ?? 0) > 0
+        ? ` Created ${result.registrationsCreated!.toLocaleString()} registration${result.registrationsCreated === 1 ? '' : 's'} — see Manage Registration.`
+        : '';
       setImportSuccess(
-        `Imported ${result.imported.toLocaleString()} records: ${result.created.toLocaleString()} created, ${result.overwritten.toLocaleString()} overwritten.${versionNote}`
+        `Imported ${result.imported.toLocaleString()} records: ${result.created.toLocaleString()} created, ${result.overwritten.toLocaleString()} overwritten.${registrationsNote}${versionNote}`
       );
     } catch (error) {
       const message = error instanceof ApiError ? error.message : 'Failed to import forecast';
@@ -506,15 +509,15 @@ function formatUnmatchedReason(
     }
     return item.reason;
   }
-  return 'No matching CRM registration — forecast will not be imported for this key';
+  return 'No matching CRM registration — a new registration will be created on confirm';
 }
 
 const UNMATCHED_HINT_LABELS: Record<string, string> = {
-  invalid_key_format: 'Use format SoldTo/ShipTo/EndUser/Plant/Material/OnOff with all segments filled',
-  non_main_registration: 'Use the Main Registration key from CRM (MainRegist = 1)',
-  onoff_mismatch: 'Change On/Off in the Excel key to match CRM, or update CRM registration',
-  has_actual_no_crm: 'Create or activate a CRM Main Registration for this key before importing forecast',
-  crm_not_found: 'Verify SoldTo, ShipTo, EndUser, Plant, Material, and On/Off against CRM Main Registration',
+  invalid_key_format: 'Invalid key format — registration will be created from the Excel key on confirm',
+  non_main_registration: 'Non-main CRM registration — a new master registration will be created from the Excel key on confirm',
+  onoff_mismatch: 'On/Off mismatch with CRM — a new registration will be created from the Excel key on confirm',
+  has_actual_no_crm: 'Actual exists without CRM — registration will be created automatically on confirm',
+  crm_not_found: 'Not in CRM — registration will be created automatically on confirm',
 };
 
 function formatUnmatchedHint(
@@ -571,11 +574,17 @@ function countVersionedAmountWarnings(preview: ForecastImportPreview | null, isV
 }
 
 function getImportConfirmReadyText(preview: ForecastImportPreview | null, isVersioned: boolean) {
-  if (!isVersioned) return 'Review the summary and validation details, then confirm to save Current Forecast.';
+  const registrationsToCreate = preview?.summary?.registrationsToCreate ?? 0;
+  const autoCreateNote = registrationsToCreate > 0
+    ? ` ${registrationsToCreate.toLocaleString()} registration${registrationsToCreate === 1 ? '' : 's'} with no CRM match (including invalid key format) will be created automatically on confirm.`
+    : '';
+  if (!isVersioned) {
+    return `Review the summary and validation details, then confirm to save Current Forecast.${autoCreateNote}`;
+  }
   const targetVersion = preview && isVersionedImportPreview(preview)
     ? preview.targetVersion
     : 'forecast';
-  return `Review the summary and validation details, then confirm to save ${targetVersion}.`;
+  return `Review the summary and validation details, then confirm to save ${targetVersion}.${autoCreateNote}`;
 }
 
 function ImportPreviewModal({
@@ -619,16 +628,16 @@ function ImportPreviewModal({
   const unifiedPreviewRows = preview?.unifiedPreviewRows ?? [];
   const isStalePreviewBackend = Boolean(preview && isPreviewStale(preview));
   const hasBlockingIssues = summary
-    ? summary.headerErrors > 0 ||
-      summary.duplicateRegistrationMatches > 0 ||
-      summary.invalidNumericValues > 0 ||
-      (summary.crossSheetDuplicateKeys ?? 0) > 0 ||
+    ? isStalePreviewBackend ||
+      summary.headerErrors > 0 ||
       (isVersioned && isVersionedImportPreview(preview!) && !preview!.versionExists)
-    : false;
+    : isStalePreviewBackend;
   const warningCount = summary
     ? summary.missingKeyRows +
       summary.unmatchedRows +
-      (summary.proposedRegistrationRows ?? 0) +
+      summary.invalidNumericValues +
+      summary.duplicateRegistrationMatches +
+      (summary.crossSheetDuplicateKeys ?? 0) +
       countVersionedAmountWarnings(preview, isVersioned)
     : 0;
   const importTitle = isVersioned ? 'Versioned Forecast Import' : 'Current Forecast Import';
@@ -789,9 +798,9 @@ function ImportPreviewModal({
               <div className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 shadow-sm">
                 <AlertTriangle size={18} className="mt-0.5 shrink-0 text-amber-700" />
                 <div className="text-sm text-amber-900">
-                  <p className="font-semibold">Preview data is incomplete</p>
+                  <p className="font-semibold">Preview is outdated</p>
                   <p className="mt-1 text-amber-800/90">
-                    Restart the API server (`npm run server`), then run Preview again to load detailed validation reasons.
+                    Restart the API server (`npm run server`), hard-refresh the page, then run Preview again before confirming.
                   </p>
                 </div>
               </div>
@@ -816,12 +825,18 @@ function ImportPreviewModal({
                       : <CheckCircle2 size={22} className="shrink-0 text-emerald-600" />}
                     <div className="min-w-0 flex-1">
                       <p className="text-base font-semibold text-slate-900">
-                        {hasBlockingIssues ? 'Validation completed with blocking issues' : 'Validation passed — ready to import'}
+                        {isStalePreviewBackend
+                          ? 'Preview outdated — cannot import yet'
+                          : hasBlockingIssues
+                            ? 'Validation completed with blocking issues'
+                            : 'Validation passed — ready to import'}
                       </p>
                       <p className="mt-1 text-sm text-slate-600">
-                        {hasBlockingIssues
-                          ? 'Resolve blocking issues below, then run Preview again before confirming.'
-                          : confirmReadyText}
+                        {isStalePreviewBackend
+                          ? 'Restart the API server and run Preview again so validation details match this app version.'
+                          : hasBlockingIssues
+                            ? 'Resolve blocking issues below, then run Preview again before confirming.'
+                            : confirmReadyText}
                       </p>
                     </div>
                   </div>
@@ -849,7 +864,38 @@ function ImportPreviewModal({
                   <PreviewStat label="Actual Only" value={summary.actualOnlyRows ?? 0} variant={(summary.actualOnlyRows ?? 0) > 0 ? 'warning' : 'neutral'} />
                   <PreviewStat label="Reg. Only" value={summary.registrationOnlyRows ?? 0} />
                   <PreviewStat label="New Reg." value={summary.proposedRegistrationRows ?? 0} variant={(summary.proposedRegistrationRows ?? 0) > 0 ? 'warning' : 'neutral'} />
+                  {(summary.registrationsToCreate ?? 0) > 0 && (
+                    <PreviewStat
+                      label="Auto-create"
+                      value={summary.registrationsToCreate ?? 0}
+                      variant="warning"
+                    />
+                  )}
                 </div>
+
+                {(summary.registrationsToCreate ?? 0) > 0 && (
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900">
+                    <span className="font-semibold">{summary.registrationsToCreate?.toLocaleString()} key{(summary.registrationsToCreate ?? 0) === 1 ? '' : 's'}</span>
+                    {' '}with no CRM match (including invalid key format) will create registrations automatically on confirm, then forecast values will be imported.
+                  </p>
+                )}
+
+                {summary.excelTotalQty != null && summary.importTotalQty != null && (
+                  <p className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-700">
+                    <span className="font-semibold">Total check — </span>
+                    Excel qty {summary.excelTotalQty.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                    {' · '}
+                    Import qty {summary.importTotalQty.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                    {summary.excelTotalAmount != null && summary.importTotalAmount != null && (
+                      <>
+                        {' · '}
+                        Excel amount {summary.excelTotalAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                        {' · '}
+                        Import amount {summary.importTotalAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      </>
+                    )}
+                  </p>
+                )}
 
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
                   Validation details — scroll for tables and issue lists
@@ -978,7 +1024,7 @@ function ImportPreviewModal({
                     items={(preview.duplicateExcelKeys ?? []).slice(0, 8).map(item => `${item.excelKeyForNoRegist} — rows ${item.sourceRows.join(', ')}`)}
                   />
                   <PreviewList
-                    title="Proposed New Registrations"
+                    title="Proposed New Registrations (auto-created on confirm)"
                     emptyText="No new registrations required"
                     items={unifiedPreviewRows
                       .filter(row => row.status === 'proposed_registration')
@@ -1253,7 +1299,7 @@ function ImportValidationIssues({
         {missingKeyRows.length > 0 && (
           <ValidationIssueTable
             title="Missing Key"
-            subtitle={`Not imported — ${missingKeyRows.length} row${missingKeyRows.length === 1 ? '' : 's'} with empty column A (Key for no regist)`}
+            subtitle={`Warning — ${missingKeyRows.length} row${missingKeyRows.length === 1 ? '' : 's'} with empty column A; a synthetic key was assigned for import`}
             severity="warning"
             columns={['Sheet', 'Row', 'Excel Location', 'Issue', 'Reason', 'Suggested Fix']}
             rows={missingKeyRows.map(item => [
@@ -1270,8 +1316,8 @@ function ImportValidationIssues({
         {crossSheetDuplicateKeys.length > 0 && (
           <ValidationIssueTable
             title="Cross-Sheet Duplicate Keys"
-            subtitle="Blocking — the same key appears on multiple import sheets"
-            severity="error"
+            subtitle="Warning — the same key appears on multiple sheets; values were merged for import"
+            severity="warning"
             columns={['Key', 'Sheet', 'Row']}
             rows={crossSheetDuplicateKeys.flatMap(item =>
               item.entries.map(entry => [
@@ -1286,8 +1332,8 @@ function ImportValidationIssues({
         {invalidNumericValues.length > 0 && (
           <ValidationIssueTable
             title="Invalid Numbers"
-            subtitle="Blocking — forecast values must be numeric"
-            severity="error"
+            subtitle="Warning — invalid cells were treated as 0; review before confirming"
+            severity="warning"
             columns={['Sheet', 'Row', 'Column', 'Month', 'Key', 'Value', 'Reason']}
             rows={invalidNumericValues.map(item => [
               formatSheetLabel(item.sourceSheet),
@@ -1304,8 +1350,8 @@ function ImportValidationIssues({
         {duplicateRegistrationMatches.length > 0 && (
           <ValidationIssueTable
             title="Duplicate Registration Matches"
-            subtitle="Blocking — one Excel key matched multiple CRM registrations"
-            severity="error"
+            subtitle="Warning — multiple CRM matches; the first match is used for import"
+            severity="warning"
             columns={['Sheet', 'Row', 'Key', 'Matched Registration IDs']}
             rows={duplicateRegistrationMatches.map(item => [
               formatSheetLabel(item.sourceSheet),
@@ -1337,8 +1383,8 @@ function ImportValidationIssues({
             subtitle={isStalePreviewBackend
               ? 'Warning — restart API server for detailed reasons'
               : unmatchedTotal > visibleUnmatchedRows.length
-                ? `Warning — showing ${visibleUnmatchedRows.length} of ${unmatchedTotal} keys; forecast will not be imported for these keys`
-                : 'Warning — forecast will not be imported for these keys'}
+                ? `Warning — showing ${visibleUnmatchedRows.length} of ${unmatchedTotal} keys; registrations will be auto-created on confirm`
+                : 'Warning — registrations will be auto-created on confirm for these keys'}
             severity="warning"
             columns={['Sheet', 'Row', 'Key', 'Issue', 'Reason', 'Suggested Fix']}
             rows={visibleUnmatchedRows.map(item => [

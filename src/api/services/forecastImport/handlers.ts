@@ -6,6 +6,11 @@ import {
 } from './buildLegacyPreview';
 import { buildVersionedImportPreview } from './buildVersionedPreview';
 import {
+  buildLegacyConfirmRecordsFromPackages,
+  buildVersionedConfirmRecordsFromPackages,
+  resolveOrCreateImportRegistrations,
+} from './autoCreateRegistrations';
+import {
   confirmLegacyImport,
   confirmVersionedImport,
   ForecastImportConfirmError,
@@ -14,6 +19,7 @@ import {
 } from './confirmImport';
 import { detectImportFormat, readExcelVersionLabel } from './detectFormat';
 import { deletePreviewCache, getPreviewCache } from './previewCache';
+import type { CachedPreviewPayload } from './previewCache';
 import { getRequestWorkbookBuffer } from './requestWorkbook';
 import { normalizeStampPeriod } from './stampPeriod';
 import type { ConfirmLegacyImportRecord } from './types';
@@ -117,6 +123,32 @@ function parseLegacyConfirmRecords(body: Record<string, unknown>) {
   return records;
 }
 
+async function prepareAutoCreatedImportRecords(cache: CachedPreviewPayload) {
+  const candidates = cache.autoCreateCandidates ?? [];
+  if (candidates.length === 0) {
+    return {
+      versionedRecords: cache.versionedRecords ?? [],
+      legacyRecords: cache.legacyRecords ?? [],
+      registrationsCreated: 0,
+      createdRegistrationIds: [] as string[],
+    };
+  }
+
+  const autoCreateResult = await resolveOrCreateImportRegistrations(candidates);
+  return {
+    versionedRecords: [
+      ...(cache.versionedRecords ?? []),
+      ...buildVersionedConfirmRecordsFromPackages(candidates, autoCreateResult.registrationIdByKey),
+    ],
+    legacyRecords: [
+      ...(cache.legacyRecords ?? []),
+      ...buildLegacyConfirmRecordsFromPackages(candidates, autoCreateResult.registrationIdByKey),
+    ],
+    registrationsCreated: autoCreateResult.registrationsCreated,
+    createdRegistrationIds: autoCreateResult.createdRegistrationIds,
+  };
+}
+
 export async function handleForecastConfirm(req: Request, res: Response) {
   const changedBy = sessionChangedBy(req);
   const body = req.body as {
@@ -149,8 +181,9 @@ export async function handleForecastConfirm(req: Request, res: Response) {
             code: 'STALE_PREVIEW',
           });
         }
+        const prepared = await prepareAutoCreatedImportRecords(cache);
         const result = await confirmVersionedImport(
-          cache.versionedRecords,
+          prepared.versionedRecords,
           cache.targetVersion,
           changedBy,
           stampPeriod,
@@ -160,7 +193,11 @@ export async function handleForecastConfirm(req: Request, res: Response) {
           }
         );
         deletePreviewCache(body.previewId);
-        return res.json(result);
+        return res.json({
+          ...result,
+          registrationsCreated: prepared.registrationsCreated,
+          createdRegistrationIds: prepared.createdRegistrationIds,
+        });
       }
 
       if (body.previewContractVersion !== LEGACY_PREVIEW_CONTRACT_VERSION) {
@@ -175,17 +212,22 @@ export async function handleForecastConfirm(req: Request, res: Response) {
           code: 'STALE_PREVIEW',
         });
       }
-      const result = await confirmLegacyImport(
-        cache.legacyRecords,
-        changedBy,
-        stampPeriod,
-        {
-          hasPriceColumns: cache.legacyHasPriceColumns ?? false,
-          hasAmountColumns: cache.legacyHasAmountColumns ?? false,
-        }
-      );
-      deletePreviewCache(body.previewId);
-      return res.json(result);
+        const prepared = await prepareAutoCreatedImportRecords(cache);
+        const result = await confirmLegacyImport(
+          prepared.legacyRecords,
+          changedBy,
+          stampPeriod,
+          {
+            hasPriceColumns: cache.legacyHasPriceColumns ?? false,
+            hasAmountColumns: cache.legacyHasAmountColumns ?? false,
+          }
+        );
+        deletePreviewCache(body.previewId);
+        return res.json({
+          ...result,
+          registrationsCreated: prepared.registrationsCreated,
+          createdRegistrationIds: prepared.createdRegistrationIds,
+        });
     }
 
     if (body.previewContractVersion !== LEGACY_PREVIEW_CONTRACT_VERSION) {

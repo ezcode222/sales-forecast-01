@@ -10,6 +10,16 @@ export function normalizeKey(value: unknown) {
   return String(value ?? '').trim();
 }
 
+export const SYNTHETIC_IMPORT_KEY_PREFIX = '__IMPORT__';
+
+export function buildSyntheticImportKey(sheetName: string, sourceRow: number) {
+  return `${SYNTHETIC_IMPORT_KEY_PREFIX}/${sheetName}/${sourceRow}`;
+}
+
+export function isSyntheticImportKey(key: string) {
+  return normalizeKey(key).startsWith(`${SYNTHETIC_IMPORT_KEY_PREFIX}/`);
+}
+
 export function normalizeNullableKey(value: unknown) {
   const key = normalizeKey(value);
   return !key || key.toLowerCase() === 'null' ? null : key;

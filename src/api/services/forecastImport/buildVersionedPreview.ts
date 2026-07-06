@@ -15,7 +15,6 @@ import {
   VERSIONED_PREVIEW_CONTRACT_VERSION,
 } from './constants';
 import {
-  blockedRowKey,
   chunkArray,
   getOnOffFromKey,
   primarySourceEntry,
@@ -25,6 +24,10 @@ import {
   findActualSummaries,
   findRegistrationMatches,
 } from './matching';
+import {
+  buildVersionedAutoCreatePackage,
+  collectAutoCreateCandidates,
+} from './autoCreateRegistrations';
 import { storePreviewCache } from './previewCache';
 import type {
   AmountMismatchWarning,
@@ -79,10 +82,15 @@ export type VersionedPreviewResult = {
     actualOnlyRows: number;
     registrationOnlyRows: number;
     proposedRegistrationRows: number;
+    registrationsToCreate: number;
     uniqueExcelKeys: number;
     groupedDuplicateKeys: number;
     skippedKeyGroups: number;
     amountMismatchWarnings: number;
+    excelTotalQty?: number;
+    excelTotalAmount?: number;
+    importTotalQty?: number;
+    importTotalAmount?: number;
   };
   expectedColumns: VersionedExpectedColumn[];
   detectedHeaders: Array<{ index: number; name: string }>;
@@ -288,8 +296,6 @@ export async function buildVersionedImportPreview(
   const rawUnmatchedRows: Array<{ sourceSheet: string; sourceRow: number; excelKeyForNoRegist: string }> = [];
 
   for (const group of excelGroups.values()) {
-    if (group.hasInvalidNumber) continue;
-
     const primary = primarySourceEntry(group);
     const sourceRow = primary.sourceRow;
     const excelKeyForNoRegist = group.keyNoRegist;
@@ -311,7 +317,6 @@ export async function buildVersionedImportPreview(
         excelKeyForNoRegist,
         matchedRegistrationIds: matches.map(match => match.registrationId),
       });
-      continue;
     }
 
     const rowRecords: VersionedNormalizedImportRecord[] = forecastColumns.map((forecastColumn, forecastIndex) => {
@@ -358,7 +363,13 @@ export async function buildVersionedImportPreview(
 
   unmatchedRows.push(...await diagnoseUnmatchedRows(rawUnmatchedRows, actualSummaries));
 
-  const hasBlockingHeaderErrors = headerErrors.length > 0 || crossSheetDuplicateKeys.length > 0;
+  const autoCreateCandidates = collectAutoCreateCandidates(
+    excelGroups,
+    rawUnmatchedRows.map(row => row.excelKeyForNoRegist),
+    group => buildVersionedAutoCreatePackage(group, forecastColumns)
+  );
+
+  const hasBlockingHeaderErrors = headerErrors.length > 0;
   const matchedRegistrationIds = hasBlockingHeaderErrors
     ? []
     : [...new Set(candidateRecords.map(record => record.matchedRegistrationId))];
@@ -411,9 +422,8 @@ export async function buildVersionedImportPreview(
   const previewKeySet = new Set<string>();
 
   for (const group of excelGroups.values()) {
-    if (group.hasInvalidNumber) continue;
-
-    const registration = registrationMatches.get(group.keyNoRegist)?.[0];
+    const matches = registrationMatches.get(group.keyNoRegist) ?? [];
+    const registration = matches[0];
     const actual = actualSummaries.get(group.keyNoRegist);
     const hasActual = Boolean(actual);
     previewKeySet.add(group.keyNoRegist);
@@ -504,15 +514,28 @@ export async function buildVersionedImportPreview(
   const registrationOnlyRows = unifiedPreviewRows.filter(row => row.status === 'registration_only').length;
   const proposedRegistrationRows = unifiedPreviewRows.filter(row => row.status === 'proposed_registration').length;
 
-  const blockedRows = new Set<string>([
-    ...missingKeyRows.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
-    ...unmatchedRows.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
-    ...duplicateRegistrationMatches.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
-    ...invalidNumericValues.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
-    ...crossSheetDuplicateKeys.flatMap(item =>
-      item.entries.map(entry => blockedRowKey(entry.sourceSheet, entry.sourceRow))
-    ),
-  ]);
+  const pendingImportRecords = autoCreateCandidates.reduce(
+    (sum, candidate) => sum + candidate.pendingForecastRecords.length,
+    0
+  );
+  const excelTotalQty = [...excelGroups.values()].reduce(
+    (sum, group) => sum + group.forecastValues.reduce((groupSum, value) => groupSum + value, 0),
+    0
+  );
+  const excelTotalAmount = [...excelGroups.values()].reduce(
+    (sum, group) => sum + group.amountValues.reduce((groupSum, value) => groupSum + value, 0),
+    0
+  );
+  const importTotalQty = candidateRecords.reduce((sum, record) => sum + record.qtyFcst, 0)
+    + autoCreateCandidates.reduce(
+      (sum, candidate) => sum + candidate.pendingForecastRecords.reduce((inner, record) => inner + record.qtyFcst, 0),
+      0
+    );
+  const importTotalAmount = candidateRecords.reduce((sum, record) => sum + record.amountFcst, 0)
+    + autoCreateCandidates.reduce(
+      (sum, candidate) => sum + candidate.pendingForecastRecords.reduce((inner, record) => inner + record.amountFcst, 0),
+      0
+    );
 
   const cacheEntry = storePreviewCache({
     importMode: 'versioned',
@@ -522,6 +545,7 @@ export async function buildVersionedImportPreview(
     versionedHasPriceColumns: hasPriceColumns,
     versionedHasAmountColumns: hasAmountColumns,
     amountMismatchCount: amountMismatchWarnings.length,
+    autoCreateCandidates,
   });
 
   return {
@@ -535,9 +559,9 @@ export async function buildVersionedImportPreview(
       sheetNames,
       version: targetVersion,
       totalRows: totalDataRows,
-      validRows: hasBlockingHeaderErrors ? 0 : totalDataRows - blockedRows.size,
-      importableRecords: importableRecords.length,
-      candidateRecords: candidateRecords.length,
+      validRows: hasBlockingHeaderErrors ? 0 : totalDataRows,
+      importableRecords: importableRecords.length + pendingImportRecords,
+      candidateRecords: candidateRecords.length + pendingImportRecords,
       headerErrors: headerErrors.length,
       missingKeyRows: missingKeyRows.length,
       unmatchedRows: unmatchedRows.length,
@@ -552,10 +576,15 @@ export async function buildVersionedImportPreview(
       actualOnlyRows,
       registrationOnlyRows,
       proposedRegistrationRows,
+      registrationsToCreate: autoCreateCandidates.length,
       uniqueExcelKeys: excelGroups.size,
       groupedDuplicateKeys: duplicateExcelKeys.length,
       skippedKeyGroups: skippedKeyGroups.length,
       amountMismatchWarnings: amountMismatchWarnings.length,
+      excelTotalQty,
+      excelTotalAmount,
+      importTotalQty,
+      importTotalAmount,
     },
     expectedColumns,
     detectedHeaders,

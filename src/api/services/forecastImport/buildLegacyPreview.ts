@@ -7,7 +7,7 @@ import {
 import type { CurrentForecastImportPreview } from '../../../lib/api';
 import { businessUnitFromPlantCode } from '../businessUnit';
 import { CURRENT_FORECAST_VERSION, LEGACY_PREVIEW_CONTRACT_VERSION, PREVIEW_IMPORTABLE_SAMPLE_SIZE, PREVIEW_OVERWRITE_SAMPLE_SIZE, PREVIEW_UNIFIED_ROWS_SAMPLE_SIZE, PREVIEW_UNMATCHED_ROWS_SAMPLE_SIZE } from './constants';
-import { blockedRowKey, getOnOffFromKey, primarySourceEntry } from './excelUtils';
+import { getOnOffFromKey, primarySourceEntry } from './excelUtils';
 import {
   mergeLegacySheetResults,
   parseLegacyImportSheet,
@@ -18,6 +18,10 @@ import {
   findActualSummaries,
   findRegistrationMatches,
 } from './matching';
+import {
+  buildLegacyAutoCreatePackage,
+  collectAutoCreateCandidates,
+} from './autoCreateRegistrations';
 import type { ConfirmLegacyImportRecord, LegacyNormalizedImportRecord, UnifiedPreviewRow } from './types';
 import { storePreviewCache } from './previewCache';
 
@@ -119,7 +123,6 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
   const rawUnmatchedRows: Array<{ sourceSheet: string; sourceRow: number; excelKeyForNoRegist: string }> = [];
 
   for (const group of excelGroups.values()) {
-    if (group.hasInvalidNumber) continue;
     const primary = primarySourceEntry(group);
     const sourceRow = primary.sourceRow;
     const excelKeyForNoRegist = group.keyNoRegist;
@@ -139,7 +142,6 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
         excelKeyForNoRegist,
         matchedRegistrationIds: matches.map(match => match.registrationId),
       });
-      continue;
     }
 
     const rowRecords: LegacyNormalizedImportRecord[] = extendedColumns.map((forecastColumn, forecastIndex) => ({
@@ -162,7 +164,13 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
 
   unmatchedRows.push(...await diagnoseUnmatchedRows(rawUnmatchedRows, actualSummaries));
 
-  const hasBlockingHeaderErrors = headerErrors.length > 0 || crossSheetDuplicateKeys.length > 0;
+  const autoCreateCandidates = collectAutoCreateCandidates(
+    excelGroups,
+    rawUnmatchedRows.map(row => row.excelKeyForNoRegist),
+    group => buildLegacyAutoCreatePackage(group, extendedColumns, hasPriceColumns, hasAmountColumns)
+  );
+
+  const hasBlockingHeaderErrors = headerErrors.length > 0;
   const matchedRegistrationIds = hasBlockingHeaderErrors
     ? []
     : [...new Set(candidateRecords.map(record => record.matchedRegistrationId))];
@@ -236,13 +244,14 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
     legacyHasPriceColumns: hasPriceColumns,
     legacyHasAmountColumns: hasAmountColumns,
     amountMismatchCount: 0,
+    autoCreateCandidates,
   });
 
   const unifiedPreviewRows: UnifiedPreviewRow[] = [];
   const previewKeySet = new Set<string>();
   for (const group of excelGroups.values()) {
-    if (group.hasInvalidNumber) continue;
-    const registration = registrationMatches.get(group.keyNoRegist)?.[0];
+    const matches = registrationMatches.get(group.keyNoRegist) ?? [];
+    const registration = matches[0];
     const actual = actualSummaries.get(group.keyNoRegist);
     const hasActual = Boolean(actual);
     previewKeySet.add(group.keyNoRegist);
@@ -332,15 +341,28 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
   const registrationOnlyRows = unifiedPreviewRows.filter(row => row.status === 'registration_only').length;
   const proposedRegistrationRows = unifiedPreviewRows.filter(row => row.status === 'proposed_registration').length;
 
-  const blockedRows = new Set<string>([
-    ...missingKeyRows.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
-    ...unmatchedRows.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
-    ...duplicateRegistrationMatches.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
-    ...invalidNumericValues.map(row => blockedRowKey(row.sourceSheet, row.sourceRow)),
-    ...crossSheetDuplicateKeys.flatMap(item =>
-      item.entries.map(entry => blockedRowKey(entry.sourceSheet, entry.sourceRow))
-    ),
-  ]);
+  const pendingImportRecords = autoCreateCandidates.reduce(
+    (sum, candidate) => sum + candidate.pendingForecastRecords.length,
+    0
+  );
+  const excelTotalQty = [...excelGroups.values()].reduce(
+    (sum, group) => sum + group.forecastValues.reduce((groupSum, value) => groupSum + value, 0),
+    0
+  );
+  const excelTotalAmount = [...excelGroups.values()].reduce(
+    (sum, group) => sum + group.amountValues.reduce((groupSum, value) => groupSum + value, 0),
+    0
+  );
+  const importTotalQty = candidateRecords.reduce((sum, record) => sum + record.qtyFcst, 0)
+    + autoCreateCandidates.reduce(
+      (sum, candidate) => sum + candidate.pendingForecastRecords.reduce((inner, record) => inner + record.qtyFcst, 0),
+      0
+    );
+  const importTotalAmount = candidateRecords.reduce((sum, record) => sum + record.amountFcst, 0)
+    + autoCreateCandidates.reduce(
+      (sum, candidate) => sum + candidate.pendingForecastRecords.reduce((inner, record) => inner + record.amountFcst, 0),
+      0
+    );
 
   return {
     previewId: cacheEntry.previewId,
@@ -353,9 +375,9 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
       hasPriceColumns,
       hasAmountColumns,
       totalRows: totalDataRows,
-      validRows: hasBlockingHeaderErrors ? 0 : totalDataRows - blockedRows.size,
-      importableRecords: importableRecords.length,
-      candidateRecords: candidateRecords.length,
+      validRows: hasBlockingHeaderErrors ? 0 : totalDataRows,
+      importableRecords: importableRecords.length + pendingImportRecords,
+      candidateRecords: candidateRecords.length + pendingImportRecords,
       headerErrors: headerErrors.length,
       missingKeyRows: missingKeyRows.length,
       unmatchedRows: unmatchedRows.length,
@@ -370,9 +392,14 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
       actualOnlyRows,
       registrationOnlyRows,
       proposedRegistrationRows,
+      registrationsToCreate: autoCreateCandidates.length,
       uniqueExcelKeys: excelGroups.size,
       groupedDuplicateKeys: duplicateExcelKeys.length,
       skippedKeyGroups: skippedKeyGroups.length,
+      excelTotalQty,
+      excelTotalAmount,
+      importTotalQty,
+      importTotalAmount,
     },
     expectedForecastColumns: forecastColumns,
     detectedHeaders,

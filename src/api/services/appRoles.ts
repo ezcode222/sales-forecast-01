@@ -127,7 +127,7 @@ function scoreHrIdentity(row: HrIdentity, input: {
 async function resolveHrIdentityForUser(user: AuthUser): Promise<HrIdentity | null> {
   const email = normalizeKey(user.email);
   const loginName = normalizeKey(user.loginName ?? '');
-  const displayName = normalizeKey(user.name);
+  const displayName = normalizePersonName(user.name);
   const nameKeys = [...new Set([loginName, displayName].filter(Boolean))];
   const emailLocal = email.includes('@') ? email.split('@')[0]! : email;
   if (!email && nameKeys.length === 0) return null;
@@ -142,6 +142,7 @@ async function resolveHrIdentityForUser(user: AuthUser): Promise<HrIdentity | nu
        OR LOWER(LTRIM(RTRIM(c.adLoginName))) = ${emailLocal}
        OR LOWER(LTRIM(RTRIM(c.currentEmail))) = ${emailLocal}
        OR LOWER(LTRIM(RTRIM(c.fullNameEng))) = ${displayName}
+       OR LOWER(REPLACE(REPLACE(LTRIM(RTRIM(c.fullNameEng)), CHAR(9), N' '), N'  ', N' ')) = ${displayName}
   `;
 
   if (rows.length === 0) return null;
@@ -168,6 +169,20 @@ async function lookupRoleByEmpCode(empCode: string): Promise<AppRole> {
   return 'user';
 }
 
+async function lookupRoleByEmail(email: string): Promise<{ role: AppRole; empCode: string } | null> {
+  const normalized = normalizeKey(email);
+  if (!normalized) return null;
+
+  const row = await prisma.appUserRole.findFirst({
+    where: { currentEmail: normalized },
+    select: { role: true, empCode: true },
+  });
+  if (!row) return null;
+  if (row.role === 'admin') return { role: 'admin', empCode: row.empCode };
+  if (row.role === 'super_user') return { role: 'super_user', empCode: row.empCode };
+  return null;
+}
+
 export async function resolveSessionPermissions(user: AuthUser): Promise<SessionPermissions> {
   if (isDevAuthBypass() || isDevSessionUser(user)) {
     return permissionsFromRole('admin', null);
@@ -181,6 +196,7 @@ export async function resolveSessionPermissions(user: AuthUser): Promise<Session
 
   const identity = await resolveHrIdentityForUser(user);
   let role: AppRole = 'user';
+  let empCode: string | null = identity?.empCode ?? null;
 
   if (isDefaultAdminIdentity(identity, user)) {
     role = 'admin';
@@ -189,7 +205,15 @@ export async function resolveSessionPermissions(user: AuthUser): Promise<Session
     role = await lookupRoleByEmpCode(identity.empCode);
   }
 
-  const value = permissionsFromRole(role, identity?.empCode ?? null);
+  if (role === 'user') {
+    const assignment = await lookupRoleByEmail(user.email);
+    if (assignment) {
+      role = assignment.role;
+      empCode = assignment.empCode;
+    }
+  }
+
+  const value = permissionsFromRole(role, empCode);
   permissionsCache.set(cacheKey, { value, expiresAt: Date.now() + PERMISSIONS_CACHE_TTL_MS });
   return value;
 }

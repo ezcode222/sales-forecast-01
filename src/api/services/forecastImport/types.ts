@@ -188,3 +188,35 @@ export type AmountMismatchWarning = {
 };
 
 export type ImportMode = 'current_forecast' | 'versioned';
+
+export type PendingImportForecastRecord = {
+  period: string;
+  granularity: 'month' | 'week';
+  qtyFcst: number;
+  priceFcst: number;
+  amountFcst: number;
+};
+
+export type AutoCreateRegistrationPackage = {
+  excelKeyForNoRegist: string;
+  sourceSheet: string;
+  sourceRow: number;
+  soldToCode: string;
+  shipToCode: string;
+  endUserCode: string;
+  plantCode: string;
+  materialCode: string;
+  onOffSpec: string;
+  ownerName: string | null;
+  materialDescription: string | null;
+  countryName: string | null;
+  shipToName: string | null;
+  soldToName: string | null;
+  endUser: string | null;
+  plantName: string | null;
+  process: string | null;
+  application: string | null;
+  subApp: string | null;
+  hasImportedPrice: boolean;
+  pendingForecastRecords: PendingImportForecastRecord[];
+};

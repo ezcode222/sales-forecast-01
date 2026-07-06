@@ -47,7 +47,7 @@ import {
   type EmailBatchPreview,
 } from './components/notifications/NotificationEmailPreviewModal';
 import { getForecastCellValue, getForecastStoragePeriod, monthKey } from './components/forecast/forecastCellUtils';
-import { filterRegistrations, isColumnFilterActive } from './components/forecast/forecastFilterUtils';
+import { filterRegistrations } from './components/forecast/forecastFilterUtils';
 import { api, ApiError, formatApiError, type AuthUser, type SessionPermissions, type SnapshotStatus } from './lib/api';
 import { effectivePermissions } from './lib/permissions';
 import {
@@ -804,28 +804,6 @@ export default function App() {
       // Local storage is optional; filters still work without persistence.
     }
   }, [columnFilters.businessUnit?.selectedValues]);
-  const businessUnitFilterValues = columnFilters.businessUnit?.selectedValues ?? [];
-  const nonBusinessUnitFilterCount = useMemo(
-    () => Object.keys(columnFilters)
-      .filter(key => key !== 'businessUnit' && isColumnFilterActive(columnFilters[key]))
-      .length,
-    [columnFilters]
-  );
-  const clearNonBusinessUnitFilters = useCallback(() => {
-    setColumnFilters(previous => {
-      const businessUnitFilter = previous.businessUnit;
-      return businessUnitFilter?.selectedValues.length
-        ? { businessUnit: businessUnitFilter }
-        : {};
-    });
-  }, []);
-  const clearBusinessUnitFilter = useCallback(() => {
-    setColumnFilters(previous => {
-      const next = { ...previous };
-      delete next.businessUnit;
-      return next;
-    });
-  }, []);
   const loadFilterOptions = useCallback(
     (columnKey: string, search: string, cursor?: string | null) =>
       api.registrations.filterOptions(
@@ -2083,9 +2061,6 @@ export default function App() {
     targetVersion = CURRENT_FORECAST_VERSION,
     options?: { startMonth?: string; endMonth?: string }
   ) => {
-    const registrationIds = registrations.map(registration => registration.id);
-    if (registrationIds.length === 0) return;
-
     setSelectedVersion(targetVersion);
     if (versions.includes(targetVersion)) {
       setPriceManagementVersion(targetVersion);
@@ -2104,6 +2079,27 @@ export default function App() {
 
     loadStart();
     try {
+      const managed = await api.registrations.managed();
+      setManagedRegistrations(managed);
+
+      let registrationIds = registrations.map(registration => registration.id);
+      if (managed.length > 0) {
+        setRegistrations(previous => {
+          const byId = new Map(previous.map(registration => [registration.id, registration]));
+          for (const registration of managed) {
+            byId.set(registration.id, registration);
+          }
+          return [...byId.values()];
+        });
+        const mergedIds = new Set(registrationIds);
+        for (const registration of managed) {
+          mergedIds.add(registration.id);
+        }
+        registrationIds = [...mergedIds];
+      }
+
+      if (registrationIds.length === 0) return;
+
       const [forecasts, actuals] = await Promise.all([
         api.forecast.list({
           version: targetVersion,
@@ -2295,17 +2291,15 @@ export default function App() {
               onClose={() => setOpenNavMenu(null)}
               active={isManageNavActive}
             >
-              {sessionPermissions.role === 'admin' && (
-                <NavDropdownItem
-                  label="Price Base"
-                  icon={<SlidersHorizontal size={14} />}
-                  onClick={() => {
-                    flash();
-                    setOpenNavMenu(null);
-                    setActiveTab('master');
-                  }}
-                />
-              )}
+              <NavDropdownItem
+                label="Price Base"
+                icon={<SlidersHorizontal size={14} />}
+                onClick={() => {
+                  flash();
+                  setOpenNavMenu(null);
+                  setActiveTab('master');
+                }}
+              />
               {sessionPermissions.canManageAdmin && (
                 <NavDropdownItem
                   label="Admin"
@@ -2491,17 +2485,17 @@ export default function App() {
         <header
           className={cn(
             "relative bg-white border-b border-slate-200 shrink-0 z-40 overflow-visible",
-            isForecastHeaderCollapsed ? "h-3" : "h-[115px] shadow-sm"
+            isForecastHeaderCollapsed ? "h-3" : "h-[100px] shadow-sm"
           )}
         >
           <button
             type="button"
             onClick={() => setIsForecastHeaderCollapsed(prev => !prev)}
             className={cn(
-              "absolute left-1/2 z-50 h-8 w-8 -translate-x-1/2 rounded-lg border border-slate-200 bg-white text-slate-500 shadow-sm flex items-center justify-center transition-[color,border-color,background-color,transform] duration-150 will-change-transform",
+              "absolute left-1/2 top-full z-50 flex h-8 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 shadow-sm transition-[color,border-color,background-color,transform] duration-150 will-change-transform",
               isForecastHeaderCollapsed
-                ? "bottom-[-18px] hover:bg-white hover:text-blue-600 hover:border-blue-200"
-                : "bottom-1 hover:bg-slate-50 hover:text-slate-900 hover:border-slate-300"
+                ? "hover:bg-white hover:text-blue-600 hover:border-blue-200"
+                : "hover:bg-slate-50 hover:text-slate-900 hover:border-slate-300"
             )}
             title={isForecastHeaderCollapsed ? "Show filter bar" : "Hide filter bar"}
             aria-label={isForecastHeaderCollapsed ? "Show filter bar" : "Hide filter bar"}
@@ -2516,15 +2510,14 @@ export default function App() {
           </button>
           <div
             className={cn(
-              "h-[115px] px-4 pt-5 pb-3 flex flex-col justify-center transition-[opacity,transform] duration-200 ease-in-out",
+              "h-[100px] px-4 pt-3 pb-2.5 flex flex-col justify-center transition-[opacity,transform] duration-200 ease-in-out",
               isForecastHeaderCollapsed
                 ? "pointer-events-none -translate-y-2 opacity-0"
                 : "translate-y-0 opacity-100"
             )}
           >
-          <div className="grid grid-cols-7 gap-6 max-w-[1400px] items-center">
-            <div className="col-span-2">
-              <FilterGroup
+          <div className="grid w-full max-w-[1400px] grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,2fr)_minmax(0,1fr)] items-center gap-4">
+            <FilterGroup
                 label="Date Range"
                 action={
                   <div className="inline-flex items-center rounded-full border border-slate-200 bg-slate-100 p-1 text-[10px] font-bold uppercase">
@@ -2624,7 +2617,6 @@ export default function App() {
                 )}
                 </div>
               </FilterGroup>
-            </div>
 
             <FilterGroup label="Dimension">
               <div className="flex bg-slate-100 p-1 rounded-lg">
@@ -2660,13 +2652,15 @@ export default function App() {
               </div>
             </FilterGroup>
 
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(72px,88px)] gap-3">
             <FilterGroup label="Forecast Version">
-              <div className="flex flex-wrap items-center gap-2 relative">
-                <div className="relative flex-1 min-w-0">
+              <div className="flex w-full items-center gap-1.5 relative">
+                <div className="relative min-w-0 flex-1">
                   <select
                     value={selectedVersion}
                     onChange={e => { flash(); setSelectedVersion(e.target.value); }}
-                    className="sf-select w-full text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors"
+                    className="sf-select w-full min-w-0 text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors"
+                    title={selectedVersion}
                   >
                     {versions.map(v => <option key={v}>{v}</option>)}
                   </select>
@@ -2675,22 +2669,24 @@ export default function App() {
                   </div>
                 </div>
                     <button 
+                      type="button"
                       onClick={() => {
                         setIsAddingVersion(true);
                         setIsEditingVersion(false);
                       }}
-                      className="p-1.5 hover:bg-blue-50 text-blue-600 rounded-lg border border-blue-100 transition-colors bg-white shadow-sm"
+                      className="shrink-0 p-1.5 hover:bg-blue-50 text-blue-600 rounded-lg border border-blue-100 transition-colors bg-white shadow-sm"
                       title="Add new version"
                     >
                       <Plus size={16} />
                     </button>
                     <button 
+                      type="button"
                       onClick={() => {
                         setEditingVersionName(selectedVersion);
                         setIsEditingVersion(true);
                         setIsAddingVersion(false);
                       }}
-                      className="p-1.5 hover:bg-blue-50 text-blue-600 rounded-lg border border-blue-100 transition-colors bg-white shadow-sm"
+                      className="shrink-0 p-1.5 hover:bg-blue-50 text-blue-600 rounded-lg border border-blue-100 transition-colors bg-white shadow-sm"
                       title="Rename selected version"
                     >
                       <Pencil size={16} />
@@ -2848,11 +2844,13 @@ export default function App() {
 
                 <FilterGroup label="STAMP PERIOD">
                   <SfSelect
+                    className="w-full max-w-[88px]"
                     value={stampPeriod}
                     onChange={nextPeriod => { flash(); setStampPeriod(nextPeriod); }}
                     options={STAMP_PERIOD_OPTIONS}
                   />
                 </FilterGroup>
+            </div>
 
                 <FilterGroup label="VIEW MODE">
                   <SfSelect
@@ -2865,36 +2863,6 @@ export default function App() {
                     ]}
                   />
                 </FilterGroup>
-
-            {(nonBusinessUnitFilterCount > 0 || businessUnitFilterValues.length > 0) && (
-              <div className="flex items-center justify-end gap-2">
-                {businessUnitFilterValues.length > 0 && (
-                  <div className="flex h-8 items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 text-[10px] font-bold uppercase tracking-wide text-blue-700">
-                    <span>BU: {businessUnitFilterValues.join(', ')}</span>
-                    <button
-                      type="button"
-                      onClick={clearBusinessUnitFilter}
-                      className="flex h-4 w-4 items-center justify-center rounded-full bg-white text-blue-400 transition-colors hover:text-red-500"
-                      aria-label="Clear BU filter"
-                      title="Clear BU filter"
-                    >
-                      <X size={11} />
-                    </button>
-                  </div>
-                )}
-                {nonBusinessUnitFilterCount > 0 && (
-                  <button
-                    type="button"
-                    onClick={clearNonBusinessUnitFilters}
-                    className="flex h-8 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-[10px] font-black uppercase tracking-wide text-slate-500 shadow-sm transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                    title="Clear filters but keep BU"
-                  >
-                    <X size={12} />
-                    Clear {nonBusinessUnitFilterCount} Filter{nonBusinessUnitFilterCount === 1 ? '' : 's'}
-                  </button>
-                )}
-              </div>
-            )}
           </div>
           </div>
         </header>

@@ -10,6 +10,9 @@ import {
 } from '../../types/forecast';
 import { ALL_REG_COLUMNS } from './regTableColumns';
 
+const EXCEL_IMPORT_CREATED_BY = 'excel-import';
+type RegistrationSourceFilter = 'all' | 'manual' | 'import';
+
 const REQUIRED_FIELDS: Array<{ key: RegColumnKey; label: string }> = [
   { key: 'materialDescription', label: 'Material Description' },
   { key: 'materialCode', label: 'Material Code' },
@@ -493,6 +496,7 @@ export function ManageRegistrationPanel({
   const [selectedOptionalFields, setSelectedOptionalFields] = useState<RegColumnKey[]>([]);
   const [fieldSearch, setFieldSearch] = useState('');
   const [listSearch, setListSearch] = useState('');
+  const [sourceFilter, setSourceFilter] = useState<RegistrationSourceFilter>('all');
   const [showOptionalFields, setShowOptionalFields] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -513,17 +517,21 @@ export function ManageRegistrationPanel({
   }, [fieldSearch, optionalFields]);
   const filteredRegistrations = useMemo(() => {
     const query = listSearch.trim().toLowerCase();
-    if (!query) return registrations;
-    return registrations.filter(registration =>
-      [
+    return registrations.filter(registration => {
+      const isImport = registration.createdBy === EXCEL_IMPORT_CREATED_BY;
+      if (sourceFilter === 'import' && !isImport) return false;
+      if (sourceFilter === 'manual' && isImport) return false;
+      if (!query) return true;
+      return [
         registration.materialDescription,
         registration.materialCode,
         registration.plantCode,
         registration.ownerName,
         registration.registrationTopic,
-      ].some(value => String(value ?? '').toLowerCase().includes(query))
-    );
-  }, [listSearch, registrations]);
+        registration.keyForNoCRM,
+      ].some(value => String(value ?? '').toLowerCase().includes(query));
+    });
+  }, [listSearch, registrations, sourceFilter]);
 
   useEffect(() => {
     if (!open) {
@@ -531,6 +539,7 @@ export function ManageRegistrationPanel({
       setSelectedOptionalFields([]);
       setFieldSearch('');
       setListSearch('');
+      setSourceFilter('all');
       setShowOptionalFields(false);
       setSubmitted(false);
       setSaving(false);
@@ -780,7 +789,7 @@ export function ManageRegistrationPanel({
                       {registrations.length}
                     </span>
                   </div>
-                  <div className="relative">
+                  <div className="relative mb-2">
                     <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
                       type="search"
@@ -789,6 +798,27 @@ export function ManageRegistrationPanel({
                       placeholder="Search registrations..."
                       className="h-9 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-xs outline-none transition-all focus:border-[#007ABE]/40 focus:ring-2 focus:ring-[#007ABE]/15"
                     />
+                  </div>
+                  <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-0.5">
+                    {([
+                      ['all', 'All'],
+                      ['manual', 'Manual'],
+                      ['import', 'From Import'],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setSourceFilter(value)}
+                        className={cn(
+                          'flex-1 rounded-md px-2 py-1 text-[10px] font-semibold transition-colors',
+                          sourceFilter === value
+                            ? 'bg-[#007ABE] text-white'
+                            : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
                 </div>
                 <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2.5">
@@ -813,11 +843,23 @@ export function ManageRegistrationPanel({
                             : 'border-slate-200/80 hover:border-slate-300 hover:shadow-sm'
                         )}
                       >
-                        <p className="truncate text-xs font-semibold text-slate-800">{registration.materialDescription}</p>
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="truncate text-xs font-semibold text-slate-800">{registration.materialDescription}</p>
+                          {registration.createdBy === EXCEL_IMPORT_CREATED_BY && (
+                            <span className="shrink-0 rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-amber-800">
+                              Import
+                            </span>
+                          )}
+                        </div>
                         <p className="mt-0.5 truncate text-[10px] text-slate-500">
                           {registration.materialCode} / {registration.plantCode}
                         </p>
                         <p className="truncate text-[10px] text-slate-400">{registration.ownerName}</p>
+                        {registration.keyForNoCRM && (
+                          <p className="mt-0.5 truncate font-mono text-[9px] text-slate-400" title={registration.keyForNoCRM}>
+                            {registration.keyForNoCRM}
+                          </p>
+                        )}
                       </button>
                     ))
                   )}

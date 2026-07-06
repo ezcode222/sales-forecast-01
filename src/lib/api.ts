@@ -74,6 +74,7 @@ export interface CurrentForecastImportPreview {
     actualOnlyRows: number;
     registrationOnlyRows: number;
     proposedRegistrationRows: number;
+    registrationsToCreate?: number;
     uniqueExcelKeys: number;
     groupedDuplicateKeys: number;
     createRecords: number;
@@ -81,6 +82,10 @@ export interface CurrentForecastImportPreview {
     skippedKeyGroups?: number;
     hasPriceColumns?: boolean;
     hasAmountColumns?: boolean;
+    excelTotalQty?: number;
+    excelTotalAmount?: number;
+    importTotalQty?: number;
+    importTotalAmount?: number;
   };
   expectedForecastColumns: Array<{
     col: string;
@@ -166,6 +171,8 @@ export interface CurrentForecastImportResult {
   created: number;
   overwritten: number;
   version: string;
+  registrationsCreated?: number;
+  createdRegistrationIds?: string[];
 }
 
 export interface VersionedExpectedColumn {
@@ -241,8 +248,8 @@ export function isVersionedImportPreview(
   return 'expectedColumns' in preview && Array.isArray(preview.expectedColumns) && 'previewId' in preview;
 }
 
-export const LEGACY_FORECAST_IMPORT_CONTRACT_VERSION = 9;
-export const VERSIONED_FORECAST_IMPORT_CONTRACT_VERSION = 1;
+export const LEGACY_FORECAST_IMPORT_CONTRACT_VERSION = 12;
+export const VERSIONED_FORECAST_IMPORT_CONTRACT_VERSION = 4;
 
 export interface OverplanConfig {
   id: string;
