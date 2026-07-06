@@ -88,13 +88,19 @@ function parseLegacyConfirmRecords(body: Record<string, unknown>) {
     const matchedRegistrationId = normalizeKey(record.matchedRegistrationId);
     const period = normalizeKey(record.period);
     const qtyFcst = Number(record.qtyFcst);
+    const priceFcst = Number(record.priceFcst ?? 0);
+    const amountFcst = Number(record.amountFcst ?? 0);
     if (
       !excelKeyForNoRegist ||
       !matchedRegistrationId ||
       !isFirstWednesdayPeriod(period) ||
       record.granularity !== 'week' ||
       !Number.isFinite(qtyFcst) ||
-      qtyFcst < 0
+      qtyFcst < 0 ||
+      !Number.isFinite(priceFcst) ||
+      priceFcst < 0 ||
+      !Number.isFinite(amountFcst) ||
+      amountFcst < 0
     ) {
       throw new ForecastImportConfirmError(400, 'Import contains an invalid forecast record.');
     }
@@ -104,6 +110,8 @@ function parseLegacyConfirmRecords(body: Record<string, unknown>) {
       period,
       granularity: 'week',
       qtyFcst,
+      priceFcst,
+      amountFcst,
     });
   }
   return records;
@@ -145,7 +153,11 @@ export async function handleForecastConfirm(req: Request, res: Response) {
           cache.versionedRecords,
           cache.targetVersion,
           changedBy,
-          stampPeriod
+          stampPeriod,
+          {
+            hasPriceColumns: cache.versionedHasPriceColumns ?? true,
+            hasAmountColumns: cache.versionedHasAmountColumns ?? true,
+          }
         );
         deletePreviewCache(body.previewId);
         return res.json(result);
@@ -163,7 +175,15 @@ export async function handleForecastConfirm(req: Request, res: Response) {
           code: 'STALE_PREVIEW',
         });
       }
-      const result = await confirmLegacyImport(cache.legacyRecords, changedBy, stampPeriod);
+      const result = await confirmLegacyImport(
+        cache.legacyRecords,
+        changedBy,
+        stampPeriod,
+        {
+          hasPriceColumns: cache.legacyHasPriceColumns ?? false,
+          hasAmountColumns: cache.legacyHasAmountColumns ?? false,
+        }
+      );
       deletePreviewCache(body.previewId);
       return res.json(result);
     }

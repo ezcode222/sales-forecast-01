@@ -21,8 +21,12 @@ export interface CurrentForecastImportRecord {
   period: string;
   granularity: 'week';
   qtyFcst: number;
+  priceFcst: number;
+  amountFcst: number;
   action: 'create' | 'overwrite';
   oldQtyFcst: number | null;
+  oldPriceFcst?: number | null;
+  oldAmountFcst?: number | null;
 }
 
 export interface CurrentForecastUnifiedPreviewRow {
@@ -75,6 +79,8 @@ export interface CurrentForecastImportPreview {
     createRecords: number;
     overwriteRecords: number;
     skippedKeyGroups?: number;
+    hasPriceColumns?: boolean;
+    hasAmountColumns?: boolean;
   };
   expectedForecastColumns: Array<{
     col: string;
@@ -235,7 +241,7 @@ export function isVersionedImportPreview(
   return 'expectedColumns' in preview && Array.isArray(preview.expectedColumns) && 'previewId' in preview;
 }
 
-export const LEGACY_FORECAST_IMPORT_CONTRACT_VERSION = 8;
+export const LEGACY_FORECAST_IMPORT_CONTRACT_VERSION = 9;
 export const VERSIONED_FORECAST_IMPORT_CONTRACT_VERSION = 1;
 
 export interface OverplanConfig {

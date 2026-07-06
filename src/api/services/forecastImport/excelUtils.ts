@@ -123,6 +123,57 @@ export function getRequestWorkbookBuffer(body: unknown) {
   return null;
 }
 
+export type ExtendedForecastColumn = ForecastImportColumn & {
+  qtyIndex: number;
+  priceIndex: number;
+  amountIndex: number;
+  priceHeader: string;
+  amountHeader: string;
+};
+
+export function buildExtendedForecastColumns(
+  header: unknown[],
+  periodForMonth: (month: string) => string
+): { columns: ExtendedForecastColumn[]; hasPriceColumns: boolean; hasAmountColumns: boolean } {
+  const qtyColumns = header
+    .map((value, index) => parseForecastMonthColumn(value, index))
+    .filter((column): column is ForecastImportColumn => column !== null);
+
+  const priceByMonth = new Map<string, { index: number; header: string }>();
+  const amountByMonth = new Map<string, { index: number; header: string }>();
+
+  header.forEach((value, index) => {
+    const parsed = parseMonthTokenFromPrefixedHeader(value);
+    if (!parsed) return;
+    const normalized = normalizeHeader(value);
+    if (/^P_/i.test(normalized)) {
+      priceByMonth.set(parsed.month, { index, header: parsed.header });
+    } else if (/^A_/i.test(normalized)) {
+      amountByMonth.set(parsed.month, { index, header: parsed.header });
+    }
+  });
+
+  const columns = qtyColumns.map(qtyColumn => {
+    const price = priceByMonth.get(qtyColumn.month);
+    const amount = amountByMonth.get(qtyColumn.month);
+    return {
+      ...qtyColumn,
+      period: periodForMonth(qtyColumn.month),
+      qtyIndex: qtyColumn.index,
+      priceIndex: price?.index ?? -1,
+      amountIndex: amount?.index ?? -1,
+      priceHeader: price?.header ?? '',
+      amountHeader: amount?.header ?? '',
+    };
+  });
+
+  return {
+    columns,
+    hasPriceColumns: priceByMonth.size > 0,
+    hasAmountColumns: amountByMonth.size > 0,
+  };
+}
+
 export function sheetHasLegacyImportLayout(sheet: XLSX.WorkSheet) {
   const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
     header: 1,

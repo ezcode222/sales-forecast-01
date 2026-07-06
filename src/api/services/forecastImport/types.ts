@@ -28,8 +28,12 @@ export type LegacyNormalizedImportRecord = {
   period: string;
   granularity: 'week';
   qtyFcst: number;
+  priceFcst: number;
+  amountFcst: number;
   action?: 'create' | 'overwrite';
   oldQtyFcst?: number | null;
+  oldPriceFcst?: number | null;
+  oldAmountFcst?: number | null;
 };
 
 export type VersionedNormalizedImportRecord = {
@@ -52,7 +56,7 @@ export type VersionedNormalizedImportRecord = {
 
 export type ConfirmLegacyImportRecord = Pick<
   LegacyNormalizedImportRecord,
-  'excelKeyForNoRegist' | 'matchedRegistrationId' | 'period' | 'granularity' | 'qtyFcst'
+  'excelKeyForNoRegist' | 'matchedRegistrationId' | 'period' | 'granularity' | 'qtyFcst' | 'priceFcst' | 'amountFcst'
 >;
 
 export type ConfirmVersionedImportRecord = Pick<
@@ -135,13 +139,12 @@ export type ExcelForecastGroup = {
   owner: string | null;
   businessUnit: string | null;
   forecastValues: number[];
+  priceValues: number[];
+  amountValues: number[];
   hasInvalidNumber: boolean;
 };
 
-export type ExcelVersionedGroup = ExcelForecastGroup & {
-  priceValues: number[];
-  amountValues: number[];
-};
+export type ExcelVersionedGroup = ExcelForecastGroup;
 
 export type ImportHeaderError = {
   sourceSheet: string;

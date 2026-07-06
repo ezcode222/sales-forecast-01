@@ -53,6 +53,9 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
     sheetNames,
     totalDataRows,
     forecastColumns,
+    extendedColumns,
+    hasPriceColumns,
+    hasAmountColumns,
     headerErrors,
     detectedHeaders,
     missingKeyRows,
@@ -139,7 +142,7 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
       continue;
     }
 
-    const rowRecords: LegacyNormalizedImportRecord[] = forecastColumns.map((forecastColumn, forecastIndex) => ({
+    const rowRecords: LegacyNormalizedImportRecord[] = extendedColumns.map((forecastColumn, forecastIndex) => ({
       sourceRow,
       excelKeyForNoRegist,
       matchedRegistrationId: matches[0].registrationId,
@@ -150,6 +153,8 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
       period: forecastColumn.period,
       granularity: 'week',
       qtyFcst: group.forecastValues[forecastIndex],
+      priceFcst: hasPriceColumns ? group.priceValues[forecastIndex] : 0,
+      amountFcst: hasAmountColumns ? group.amountValues[forecastIndex] : 0,
     }));
 
     candidateRecords.push(...rowRecords);
@@ -174,6 +179,7 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
           period: true,
           qtyFcst: true,
           priceFcst: true,
+          amountFcst: true,
           granularity: true,
         },
       })
@@ -193,6 +199,8 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
           ...record,
           action: existing ? 'overwrite' as const : 'create' as const,
           oldQtyFcst: existing ? Number(existing.qtyFcst) : null,
+          oldPriceFcst: existing ? Number(existing.priceFcst) : null,
+          oldAmountFcst: existing ? Number(existing.amountFcst) : null,
         };
       });
   const overwriteRecords = importableRecords
@@ -215,6 +223,8 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
       period: record.period,
       granularity: record.granularity,
       qtyFcst: record.qtyFcst,
+      priceFcst: record.priceFcst,
+      amountFcst: record.amountFcst,
     }));
   }
 
@@ -223,6 +233,8 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
     previewContractVersion: LEGACY_PREVIEW_CONTRACT_VERSION,
     targetVersion: CURRENT_FORECAST_VERSION,
     legacyRecords: toConfirmRecords(importableRecords),
+    legacyHasPriceColumns: hasPriceColumns,
+    legacyHasAmountColumns: hasAmountColumns,
     amountMismatchCount: 0,
   });
 
@@ -338,6 +350,8 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
       sheetName: sheetNameLabel,
       sheetNames,
       version: CURRENT_FORECAST_VERSION,
+      hasPriceColumns,
+      hasAmountColumns,
       totalRows: totalDataRows,
       validRows: hasBlockingHeaderErrors ? 0 : totalDataRows - blockedRows.size,
       importableRecords: importableRecords.length,

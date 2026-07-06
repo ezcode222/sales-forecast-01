@@ -14,6 +14,10 @@ export type CachedPreviewPayload = {
   targetVersion: string;
   legacyRecords?: ConfirmLegacyImportRecord[];
   versionedRecords?: ConfirmVersionedImportRecord[];
+  legacyHasPriceColumns?: boolean;
+  legacyHasAmountColumns?: boolean;
+  versionedHasPriceColumns?: boolean;
+  versionedHasAmountColumns?: boolean;
   amountMismatchCount: number;
   expiresAt: number;
 };

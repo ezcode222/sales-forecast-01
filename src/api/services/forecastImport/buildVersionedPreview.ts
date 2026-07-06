@@ -219,6 +219,8 @@ export async function buildVersionedImportPreview(
     sheetNames,
     totalDataRows,
     forecastColumns,
+    hasPriceColumns,
+    hasAmountColumns,
     detectedHeaders,
     missingKeyRows,
     invalidNumericValues,
@@ -517,6 +519,8 @@ export async function buildVersionedImportPreview(
     previewContractVersion: VERSIONED_PREVIEW_CONTRACT_VERSION,
     targetVersion,
     versionedRecords: toConfirmRecords(importableRecords),
+    versionedHasPriceColumns: hasPriceColumns,
+    versionedHasAmountColumns: hasAmountColumns,
     amountMismatchCount: amountMismatchWarnings.length,
   });
 

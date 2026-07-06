@@ -126,13 +126,19 @@ function parseLegacyRecords(records: ConfirmLegacyImportRecord[]): ConfirmLegacy
     const matchedRegistrationId = normalizeKey(record.matchedRegistrationId);
     const period = normalizeKey(record.period);
     const qtyFcst = Number(record.qtyFcst);
+    const priceFcst = Number(record.priceFcst ?? 0);
+    const amountFcst = Number(record.amountFcst ?? 0);
     if (
       !excelKeyForNoRegist ||
       !matchedRegistrationId ||
       !isFirstWednesdayPeriod(period) ||
       record.granularity !== 'week' ||
       !Number.isFinite(qtyFcst) ||
-      qtyFcst < 0
+      qtyFcst < 0 ||
+      !Number.isFinite(priceFcst) ||
+      priceFcst < 0 ||
+      !Number.isFinite(amountFcst) ||
+      amountFcst < 0
     ) {
       throw new ForecastImportConfirmError(400, 'Import contains an invalid forecast record.');
     }
@@ -142,6 +148,8 @@ function parseLegacyRecords(records: ConfirmLegacyImportRecord[]): ConfirmLegacy
       period,
       granularity: 'week',
       qtyFcst,
+      priceFcst,
+      amountFcst,
     });
   }
 
@@ -252,23 +260,19 @@ function buildExistingMaps(rows: ExistingForecastRow[]) {
   return { existingKeys, existingMap };
 }
 
-function qtyChanged(existing: ExistingForecastRow | undefined, qtyFcst: number) {
-  if (!existing) return true;
-  return Math.abs(Number(existing.qtyFcst ?? 0) - qtyFcst) > VALUE_EPSILON;
-}
-
 function qtyPriceOrAmountChanged(
   existing: ExistingForecastRow | undefined,
   qtyFcst: number,
   priceFcst: number,
-  amountFcst: number
+  amountFcst: number,
+  hasPriceColumns = true,
+  hasAmountColumns = true
 ) {
   if (!existing) return true;
-  return (
-    Math.abs(Number(existing.qtyFcst ?? 0) - qtyFcst) > VALUE_EPSILON ||
-    Math.abs(Number(existing.priceFcst ?? 0) - priceFcst) > VALUE_EPSILON ||
-    Math.abs(Number(existing.amountFcst ?? 0) - amountFcst) > VALUE_EPSILON
-  );
+  if (Math.abs(Number(existing.qtyFcst ?? 0) - qtyFcst) > VALUE_EPSILON) return true;
+  if (hasPriceColumns && Math.abs(Number(existing.priceFcst ?? 0) - priceFcst) > VALUE_EPSILON) return true;
+  if (hasAmountColumns && Math.abs(Number(existing.amountFcst ?? 0) - amountFcst) > VALUE_EPSILON) return true;
+  return false;
 }
 
 function buildImportResult(
@@ -292,7 +296,11 @@ function buildImportResult(
 export async function confirmLegacyImport(
   records: ConfirmLegacyImportRecord[],
   changedBy: string,
-  stampPeriod: unknown
+  stampPeriod: unknown,
+  columnFlags: { hasPriceColumns: boolean; hasAmountColumns: boolean } = {
+    hasPriceColumns: false,
+    hasAmountColumns: false,
+  }
 ): Promise<ForecastImportConfirmResult> {
   const parsedRecords = parseLegacyRecords(records);
   const normalizedChangedBy = normalizeChangedBy(changedBy);
@@ -313,7 +321,14 @@ export async function confirmLegacyImport(
 
   const changedRecords = parsedRecords.filter(record => {
     const key = destinationKey(record.matchedRegistrationId, record.period, 'week');
-    return qtyChanged(existingMap.get(key), record.qtyFcst);
+    return qtyPriceOrAmountChanged(
+      existingMap.get(key),
+      record.qtyFcst,
+      record.priceFcst,
+      record.amountFcst,
+      columnFlags.hasPriceColumns,
+      columnFlags.hasAmountColumns
+    );
   });
   const changedKeys = new Set(
     changedRecords.map(record =>
@@ -326,6 +341,8 @@ export async function confirmLegacyImport(
       registrationId: record.matchedRegistrationId,
       period: record.period,
       qtyFcst: record.qtyFcst,
+      priceFcst: record.priceFcst,
+      amountFcst: record.amountFcst,
       changed: changedKeys.has(
         destinationKey(record.matchedRegistrationId, record.period, 'week')
       )
@@ -333,6 +350,9 @@ export async function confirmLegacyImport(
         : 0,
     }))
   );
+
+  const updatePrice = columnFlags.hasPriceColumns ? 1 : 0;
+  const updateAmount = columnFlags.hasAmountColumns ? 1 : 0;
 
   await prisma.$transaction(async transaction => {
     await transaction.forecastVersion.upsert({
@@ -351,12 +371,14 @@ export async function confirmLegacyImport(
     await transaction.$executeRaw`
       MERGE [dbo].[forecast_values] AS target
       USING (
-        SELECT registrationId, period, qtyFcst, changed
+        SELECT registrationId, period, qtyFcst, priceFcst, amountFcst, changed
         FROM OPENJSON(${mergePayload})
         WITH (
           registrationId NVARCHAR(200) '$.registrationId',
           period DATE '$.period',
           qtyFcst DECIMAL(18,4) '$.qtyFcst',
+          priceFcst DECIMAL(18,4) '$.priceFcst',
+          amountFcst DECIMAL(18,4) '$.amountFcst',
           changed INT '$.changed'
         )
       ) AS source
@@ -367,6 +389,8 @@ export async function confirmLegacyImport(
         UPDATE SET
           target.granularity = 'week',
           target.qtyFcst = source.qtyFcst,
+          target.priceFcst = CASE WHEN ${updatePrice} = 1 THEN source.priceFcst ELSE target.priceFcst END,
+          target.amountFcst = CASE WHEN ${updateAmount} = 1 THEN source.amountFcst ELSE target.amountFcst END,
           target.lastBatchId = CASE
             WHEN source.changed = 1 THEN ${batch.id}
             ELSE target.lastBatchId
@@ -379,7 +403,7 @@ export async function confirmLegacyImport(
         )
         VALUES (
           source.registrationId, ${CURRENT_FORECAST_VERSION}, source.period, 'week',
-          source.qtyFcst, 0, 0, ${batch.id}, SYSUTCDATETIME()
+          source.qtyFcst, source.priceFcst, source.amountFcst, ${batch.id}, SYSUTCDATETIME()
         );
     `;
     if (parsedRecords.length > 0) {
@@ -397,12 +421,32 @@ export async function confirmLegacyImport(
             oldQtyFcst: existing?.qtyFcst ?? null,
             newQtyFcst: record.qtyFcst,
             oldPriceFcst: existing?.priceFcst ?? null,
-            newPriceFcst: 0,
+            newPriceFcst: columnFlags.hasPriceColumns
+              ? record.priceFcst
+              : (existing?.priceFcst ?? null),
             oldAmountFcst: existing?.amountFcst ?? null,
-            newAmountFcst: 0,
+            newAmountFcst: columnFlags.hasAmountColumns
+              ? record.amountFcst
+              : (existing?.amountFcst ?? null),
           };
         }),
       });
+    }
+
+    if (columnFlags.hasPriceColumns) {
+      const registrationIdsWithFixedPrice = [
+        ...new Set(
+          parsedRecords
+            .filter(record => record.priceFcst > 0)
+            .map(record => record.matchedRegistrationId)
+        ),
+      ];
+      if (registrationIdsWithFixedPrice.length > 0) {
+        await transaction.masterDataCrmRegistration.updateMany({
+          where: { id: { in: registrationIdsWithFixedPrice } },
+          data: { priceFormula: 'Fixed Price' },
+        });
+      }
     }
   }, { timeout: 120_000 });
 
@@ -414,7 +458,11 @@ export async function confirmVersionedImport(
   records: ConfirmVersionedImportRecord[],
   targetVersion: string,
   changedBy: string,
-  stampPeriod: unknown
+  stampPeriod: unknown,
+  columnFlags: { hasPriceColumns: boolean; hasAmountColumns: boolean } = {
+    hasPriceColumns: true,
+    hasAmountColumns: true,
+  }
 ): Promise<ForecastImportConfirmResult> {
   const parsedRecords = parseVersionedRecords(records);
   const versionName = normalizeKey(targetVersion);
@@ -458,7 +506,9 @@ export async function confirmVersionedImport(
       existingMap.get(key),
       record.qtyFcst,
       record.priceFcst,
-      record.amountFcst
+      record.amountFcst,
+      columnFlags.hasPriceColumns,
+      columnFlags.hasAmountColumns
     );
   });
   const changedKeys = new Set(
@@ -481,6 +531,9 @@ export async function confirmVersionedImport(
         : 0,
     }))
   );
+
+  const updatePrice = columnFlags.hasPriceColumns ? 1 : 0;
+  const updateAmount = columnFlags.hasAmountColumns ? 1 : 0;
 
   await prisma.$transaction(async transaction => {
     const batch = await transaction.forecastCommitBatch.create({
@@ -512,8 +565,8 @@ export async function confirmVersionedImport(
         UPDATE SET
           target.granularity = 'month',
           target.qtyFcst = source.qtyFcst,
-          target.priceFcst = source.priceFcst,
-          target.amountFcst = source.amountFcst,
+          target.priceFcst = CASE WHEN ${updatePrice} = 1 THEN source.priceFcst ELSE target.priceFcst END,
+          target.amountFcst = CASE WHEN ${updateAmount} = 1 THEN source.amountFcst ELSE target.amountFcst END,
           target.lastBatchId = CASE
             WHEN source.changed = 1 THEN ${batch.id}
             ELSE target.lastBatchId
@@ -544,26 +597,32 @@ export async function confirmVersionedImport(
             oldQtyFcst: existing?.qtyFcst ?? null,
             newQtyFcst: record.qtyFcst,
             oldPriceFcst: existing?.priceFcst ?? null,
-            newPriceFcst: record.priceFcst,
+            newPriceFcst: columnFlags.hasPriceColumns
+              ? record.priceFcst
+              : (existing?.priceFcst ?? null),
             oldAmountFcst: existing?.amountFcst ?? null,
-            newAmountFcst: record.amountFcst,
+            newAmountFcst: columnFlags.hasAmountColumns
+              ? record.amountFcst
+              : (existing?.amountFcst ?? null),
           };
         }),
       });
     }
 
-    const registrationIdsWithFixedPrice = [
-      ...new Set(
-        parsedRecords
-          .filter(record => record.priceFcst > 0)
-          .map(record => record.matchedRegistrationId)
-      ),
-    ];
-    if (registrationIdsWithFixedPrice.length > 0) {
-      await transaction.masterDataCrmRegistration.updateMany({
-        where: { id: { in: registrationIdsWithFixedPrice } },
-        data: { priceFormula: 'Fixed Price' },
-      });
+    if (columnFlags.hasPriceColumns) {
+      const registrationIdsWithFixedPrice = [
+        ...new Set(
+          parsedRecords
+            .filter(record => record.priceFcst > 0)
+            .map(record => record.matchedRegistrationId)
+        ),
+      ];
+      if (registrationIdsWithFixedPrice.length > 0) {
+        await transaction.masterDataCrmRegistration.updateMany({
+          where: { id: { in: registrationIdsWithFixedPrice } },
+          data: { priceFormula: 'Fixed Price' },
+        });
+      }
     }
   }, { timeout: 120_000 });
 
