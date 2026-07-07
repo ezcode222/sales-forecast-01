@@ -494,7 +494,6 @@ export async function getFilteredRegistrationIds(filters: RegistrationFilters) {
 
 router.get('/managed', async (_req, res) => {
   try {
-    const registrationSourceSql = await getRegistrationSourceSql();
     const rows = await prisma.masterDataCrmRegistration.findMany({
       orderBy: { createdAt: 'desc' },
     });

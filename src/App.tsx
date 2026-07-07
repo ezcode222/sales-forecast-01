@@ -96,6 +96,23 @@ const STAMP_PERIOD_OPTIONS = ['No', 'Weekly1', 'Weekly2', 'Weekly3', 'Weekly4', 
 const CURRENT_FORECAST_VERSION = 'Current Forecast';
 const GLOBAL_PRICE_VERSION = 'GLOBAL';
 
+function buildScopedForecastQuery(
+  registrationIds: string[],
+  dateRange: { start: string; end: string },
+  version: string,
+  forecastMode: 'month' | 'week' | 'day',
+) {
+  const granularity: 'month' | 'week' =
+    version === CURRENT_FORECAST_VERSION && forecastMode === 'week' ? 'week' : 'month';
+  return {
+    registrationIds,
+    version,
+    startPeriod: dateRange.start.slice(0, 7),
+    endPeriod: dateRange.end.slice(0, 7),
+    granularity,
+  };
+}
+
 interface PendingCellEdit {
   registrationId: string;
   period: string;
@@ -590,10 +607,16 @@ export default function App() {
   const startDatePickerRef = useRef<HTMLInputElement | null>(null);
   const endDatePickerRef = useRef<HTMLInputElement | null>(null);
   const hasSkippedInitialActualRefreshRef = useRef(false);
+  const hasSkippedInitialForecastScopeRefreshRef = useRef(false);
   const hasSkippedInitialRegistrationFilterRef = useRef(false);
   const isLoadingMoreRef = useRef(false);
   const loadMoreAbortRef = useRef<AbortController | null>(null);
   const registrationLoadGenerationRef = useRef(0);
+  const initialForecastLoadCompleteRef = useRef(false);
+  const registrationsRef = useRef(registrations);
+  useEffect(() => {
+    registrationsRef.current = registrations;
+  }, [registrations]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isTableDataLoading, setIsTableDataLoading] = useState(false);
@@ -900,6 +923,33 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!manageRegistrationOpen) return;
+
+    let cancelled = false;
+    api.registrations.managed()
+      .then(managed => {
+        if (cancelled) return;
+        setManagedRegistrations(managed);
+        if (managed.length === 0) return;
+        setRegistrations(previous => {
+          const byId = new Map(previous.map(registration => [registration.id, registration]));
+          for (const registration of managed) {
+            byId.set(registration.id, registration);
+          }
+          return [...byId.values()];
+        });
+      })
+      .catch(error => {
+        if (cancelled) return;
+        setAppError(formatApiError(error, 'Failed to refresh new registrations'));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [manageRegistrationOpen]);
+
+  useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
     const generation = registrationLoadGenerationRef.current;
@@ -909,12 +959,12 @@ export default function App() {
         mergedRegistrationCacheRef.current.clear();
         inventoryByRegistrationIdRef.current = new Map();
         setInventoryByRegistrationId(new Map());
+        initialForecastLoadCompleteRef.current = false;
         setIsLoading(true);
         loadStart();
         setAppError(null);
-        const [registrationPage, managed, cpls, vers] = await Promise.all([
+        const [registrationPage, cpls, vers] = await Promise.all([
           api.registrations.page(null, 80, {}, controller.signal),
-          api.registrations.managed(),
           api.cpl.list(),
           api.versions.list(),
         ]);
@@ -929,7 +979,24 @@ export default function App() {
         );
         if (generation !== registrationLoadGenerationRef.current) return;
         setRegistrations(registrationPage.items);
-        setManagedRegistrations(managed);
+        ignorePromise(
+          api.registrations.managed()
+            .then(managed => {
+              if (cancelled || generation !== registrationLoadGenerationRef.current) return;
+              setManagedRegistrations(managed);
+              if (managed.length === 0) return;
+              setRegistrations(previous => {
+                const byId = new Map(previous.map(registration => [registration.id, registration]));
+                for (const registration of managed) {
+                  byId.set(registration.id, registration);
+                }
+                return [...byId.values()];
+              });
+            })
+            .catch(error => {
+              if (!cancelled) console.error('[managed registrations] background load failed:', error);
+            })
+        );
         setRegistrationCursor(registrationPage.nextCursor);
         setHasMoreRegistrations(registrationPage.hasMore);
         setCplPrices(cpls);
@@ -944,7 +1011,15 @@ export default function App() {
 
         setIsTableDataLoading(true);
         const [forecasts, actuals] = await Promise.all([
-          api.forecast.list({ registrationIds, signal: controller.signal }),
+          api.forecast.list({
+            ...buildScopedForecastQuery(
+              registrationIds,
+              dateRange,
+              selectedVersion,
+              forecastMode,
+            ),
+            signal: controller.signal,
+          }),
           api.actuals.list(
             dateRange.start.slice(0, 7),
             dateRange.end.slice(0, 7),
@@ -956,6 +1031,7 @@ export default function App() {
         ]);
         if (!cancelled && generation === registrationLoadGenerationRef.current) {
           mergeLoadedForecastData(forecasts, actuals, allVers);
+          initialForecastLoadCompleteRef.current = true;
         }
       } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
@@ -1064,7 +1140,15 @@ export default function App() {
 
       if (registrationIds.length > 0) {
         const [forecasts, actuals] = await Promise.all([
-          api.forecast.list({ registrationIds, signal: controller.signal }),
+          api.forecast.list({
+            ...buildScopedForecastQuery(
+              registrationIds,
+              dateRange,
+              selectedVersion,
+              forecastMode,
+            ),
+            signal: controller.signal,
+          }),
           api.actuals.list(
             dateRange.start.slice(0, 7),
             dateRange.end.slice(0, 7),
@@ -1100,6 +1184,7 @@ export default function App() {
     serverRegistrationFilters,
     versions,
     forecastMode,
+    selectedVersion,
   ]);
 
   useEffect(() => {
@@ -1140,7 +1225,15 @@ export default function App() {
 
         const activeVersions = versions.length > 0 ? versions : ['Current Forecast'];
         const [forecasts, actuals] = await Promise.all([
-          api.forecast.list({ registrationIds, signal: controller.signal }),
+          api.forecast.list({
+            ...buildScopedForecastQuery(
+              registrationIds,
+              dateRange,
+              selectedVersion,
+              forecastMode,
+            ),
+            signal: controller.signal,
+          }),
           api.actuals.list(
             dateRange.start.slice(0, 7),
             dateRange.end.slice(0, 7),
@@ -1302,6 +1395,59 @@ export default function App() {
     serverRegistrationFilterKey,
     versions,
     forecastMode,
+  ]);
+
+  useEffect(() => {
+    if (!initialForecastLoadCompleteRef.current) return;
+    if (!hasSkippedInitialForecastScopeRefreshRef.current) {
+      hasSkippedInitialForecastScopeRefreshRef.current = true;
+      return;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+    loadMoreAbortRef.current?.abort();
+
+    async function refreshScopedForecast() {
+      try {
+        const registrationIds = registrationsRef.current.map(registration => registration.id);
+        if (registrationIds.length === 0) return;
+
+        setIsTableDataLoading(true);
+        const activeVersions = versions.length > 0 ? versions : ['Current Forecast'];
+        const forecasts = await api.forecast.list({
+          ...buildScopedForecastQuery(
+            registrationIds,
+            dateRange,
+            selectedVersion,
+            forecastMode,
+          ),
+          signal: controller.signal,
+        });
+        if (cancelled || controller.signal.aborted) return;
+        mergeLoadedForecastData(forecasts, [], activeVersions);
+      } catch (error) {
+        if (!cancelled && !controller.signal.aborted) {
+          const message = error instanceof ApiError ? error.message : 'Failed to refresh forecast data';
+          setAppError(message);
+        }
+      } finally {
+        if (!cancelled) setIsTableDataLoading(false);
+      }
+    }
+
+    ignorePromise(refreshScopedForecast());
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [
+    dateRange.end,
+    dateRange.start,
+    forecastMode,
+    mergeLoadedForecastData,
+    selectedVersion,
+    versions,
   ]);
 
   const openDatePicker = (input: HTMLInputElement | null) => {
@@ -1490,6 +1636,7 @@ export default function App() {
       formulaFilter: formulaFilter.selectedValues,
       formulaOverrides,
       carryFilters,
+      registrationIds: registrations.map(registration => registration.id),
     };
   }, [
     columnFilters,
@@ -1499,6 +1646,7 @@ export default function App() {
     formulaFilter.selectedValues,
     formulaMap,
     monthsToShow,
+    registrations,
     selectedVersion,
     serverRegistrationFilters,
   ]);
@@ -2102,10 +2250,12 @@ export default function App() {
 
       const [forecasts, actuals] = await Promise.all([
         api.forecast.list({
-          version: targetVersion,
-          startPeriod: loadStartMonth,
-          endPeriod: loadEndMonth,
-          registrationIds,
+          ...buildScopedForecastQuery(
+            registrationIds,
+            { start: loadStartMonth, end: loadEndMonth },
+            targetVersion,
+            forecastMode,
+          ),
         }),
         api.actuals.list(
           loadStartMonth,

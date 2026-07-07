@@ -181,6 +181,7 @@ export interface ForecastSummaryPeriod {
   period: string;
   qtyAct: number;
   qtyFcst: number;
+  amountFcst: number;
   carryInETD: number;
   carryOutETD: number;
   carryInLoading: number;
@@ -202,6 +203,7 @@ export interface ForecastSummaryRequest {
   formulaFilter: string[];
   formulaOverrides: Record<string, string>;
   carryFilters: Record<string, string[]>;
+  registrationIds?: string[];
 }
 
 export interface InventoryRow {

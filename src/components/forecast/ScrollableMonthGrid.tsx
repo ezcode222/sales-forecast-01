@@ -462,36 +462,118 @@ export function ScrollableMonthGrid({
     () => new Map(forecastSummary?.periods.map(period => [period.period, period]) ?? []),
     [forecastSummary]
   );
+  const localQtyFooterTotals = useMemo(
+    () => monthsToShow.map(period =>
+      registrations.reduce((sum, registration) => {
+        const { value } = getForecastCellValue(
+          registration,
+          period,
+          selectedVersion,
+          'Qty',
+          selectedType,
+          forecastData,
+          cplPrices,
+          forecastMode,
+          planningView,
+          forecastIndex,
+          resolveRegistrationPriceFormula(formulaMap, registration),
+          naphthaprices,
+          benzeneprices,
+          fixedPriceMap,
+          {
+            cpl: cplPriceByMonth,
+            naphtha: naphthaPriceByMonth,
+            benzene: benzenePriceByMonth,
+          }
+        );
+        return sum + value;
+      }, 0)
+    ),
+    [
+      benzenePriceByMonth,
+      benzeneprices,
+      cplPriceByMonth,
+      cplPrices,
+      fixedPriceMap,
+      forecastData,
+      forecastIndex,
+      forecastMode,
+      formulaMap,
+      monthsToShow,
+      naphthaPriceByMonth,
+      naphthaprices,
+      planningView,
+      registrations,
+      selectedType,
+      selectedVersion,
+    ]
+  );
   const summaryFooterTotals = useMemo(
-    () => monthsToShow.map(period => {
+    () => monthsToShow.map((period, index) => {
       if (selectedDimension !== 'Qty') return null;
       const summary = summaryByPeriod.get(period);
-      if (!summary) return null;
-      const carryNet = planningView === 'production'
-        ? summary.carryInLoading - summary.carryOutLoading
-        : planningView === 'accounting'
-          ? summary.carryInETD - summary.carryOutETD
-          : 0;
-      const actual = summary.qtyAct + carryNet;
-      const forecast = summary.qtyFcst + carryNet;
-      if (selectedType === 'Act') return actual;
-      if (selectedType === 'Act-Fcst') return actual - forecast;
-      return forecast;
+      if (summary) {
+        const carryNet = planningView === 'production'
+          ? summary.carryInLoading - summary.carryOutLoading
+          : planningView === 'accounting'
+            ? summary.carryInETD - summary.carryOutETD
+            : 0;
+        const actual = summary.qtyAct + carryNet;
+        const forecast = summary.qtyFcst + carryNet;
+        if (selectedType === 'Act') return actual;
+        if (selectedType === 'Act-Fcst') return actual - forecast;
+        return forecast;
+      }
+      return localQtyFooterTotals[index] ?? 0;
     }),
-    [monthsToShow, planningView, selectedDimension, selectedType, summaryByPeriod]
+    [localQtyFooterTotals, monthsToShow, planningView, selectedDimension, selectedType, summaryByPeriod]
+  );
+  const summaryAmountFooterTotals = useMemo(
+    () => monthsToShow.map((period, index) => {
+      if (selectedDimension !== 'Amount' || selectedType !== 'Fcst') return null;
+      const summary = summaryByPeriod.get(period);
+      if (summary) return summary.amountFcst ?? 0;
+      return null;
+    }),
+    [monthsToShow, selectedDimension, selectedType, summaryByPeriod]
+  );
+  const summaryWeightedPriceFooterTotals = useMemo(
+    () => monthsToShow.map(period => {
+      if (selectedDimension !== 'Price' || selectedType !== 'Fcst') return null;
+      const summary = summaryByPeriod.get(period);
+      if (!summary || summary.qtyFcst <= 0) return null;
+      return (summary.amountFcst ?? 0) / summary.qtyFcst;
+    }),
+    [monthsToShow, selectedDimension, selectedType, summaryByPeriod]
   );
   const calculatedFooterTotals = useMemo(
-    () => monthsToShow.map(period => {
+    () => monthsToShow.map((period, periodIndex) => {
       if (selectedDimension === 'Qty') {
-        return summaryFooterTotals[monthsToShow.indexOf(period)];
+        return summaryFooterTotals[periodIndex];
+      }
+
+      if (selectedDimension === 'Amount' && selectedType === 'Fcst') {
+        const summaryAmount = summaryAmountFooterTotals[periodIndex];
+        if (summaryAmount !== null) return summaryAmount;
       }
 
       if (selectedDimension === 'Price') {
+        if (selectedType === 'Fcst') {
+          const summaryWeightedPrice = summaryWeightedPriceFooterTotals[periodIndex];
+          if (summaryWeightedPrice !== null) return summaryWeightedPrice;
+        }
+
         const getWeightedAverage = (type: ValueType) => {
           let totalQty = 0;
           let weightedAmount = 0;
 
           registrations.forEach(registration => {
+            const formula = resolveRegistrationPriceFormula(formulaMap, registration);
+            const priceMaps = {
+              cpl: cplPriceByMonth,
+              naphtha: naphthaPriceByMonth,
+              benzene: benzenePriceByMonth,
+            };
             const qty = getForecastCellValue(
               registration,
               period,
@@ -503,15 +585,11 @@ export function ScrollableMonthGrid({
               forecastMode,
               planningView,
               forecastIndex,
-              formulaMap.get(registration.id),
+              formula,
               naphthaprices,
               benzeneprices,
               fixedPriceMap,
-              {
-                cpl: cplPriceByMonth,
-                naphtha: naphthaPriceByMonth,
-                benzene: benzenePriceByMonth,
-              }
+              priceMaps,
             ).value;
             const price = getForecastCellValue(
               registration,
@@ -524,18 +602,14 @@ export function ScrollableMonthGrid({
               forecastMode,
               planningView,
               forecastIndex,
-              formulaMap.get(registration.id),
+              formula,
               naphthaprices,
               benzeneprices,
               fixedPriceMap,
-              {
-                cpl: cplPriceByMonth,
-                naphtha: naphthaPriceByMonth,
-                benzene: benzenePriceByMonth,
-              }
+              priceMaps,
             ).value;
 
-            if (!Number.isFinite(qty) || !Number.isFinite(price)) return;
+            if (!Number.isFinite(qty) || !Number.isFinite(price) || qty === 0) return;
             totalQty += qty;
             weightedAmount += qty * price;
           });
@@ -550,6 +624,7 @@ export function ScrollableMonthGrid({
       }
 
       return registrations.reduce((sum, registration) => {
+        const formula = resolveRegistrationPriceFormula(formulaMap, registration);
         const { value } = getForecastCellValue(
           registration,
           period,
@@ -561,7 +636,7 @@ export function ScrollableMonthGrid({
           forecastMode,
           planningView,
           forecastIndex,
-          formulaMap.get(registration.id),
+          formula,
           naphthaprices,
           benzeneprices,
           fixedPriceMap,
@@ -592,7 +667,9 @@ export function ScrollableMonthGrid({
       selectedDimension,
       selectedType,
       selectedVersion,
+      summaryAmountFooterTotals,
       summaryFooterTotals,
+      summaryWeightedPriceFooterTotals,
     ]
   );
 
@@ -637,21 +714,25 @@ export function ScrollableMonthGrid({
     if (visibleCarryColumns.length === 0) return totals;
     monthsToShow.forEach(period => {
       const summary = summaryByPeriod.get(period);
-      if (!summary) return;
-      const carryIn = planningView === 'production'
-        ? summary.carryInLoading
-        : summary.carryInETD;
-      const carryOut = planningView === 'production'
-        ? summary.carryOutLoading
-        : summary.carryOutETD;
-      totals.set(period, {
-        carryIn,
-        carryOut,
-        carryTotal: carryIn - carryOut,
-      });
+      if (summary) {
+        const carryIn = planningView === 'production'
+          ? summary.carryInLoading
+          : summary.carryInETD;
+        const carryOut = planningView === 'production'
+          ? summary.carryOutLoading
+          : summary.carryOutETD;
+        totals.set(period, {
+          carryIn,
+          carryOut,
+          carryTotal: carryIn - carryOut,
+        });
+        return;
+      }
+      const local = carryFooterTotals.get(period);
+      if (local) totals.set(period, local);
     });
     return totals;
-  }, [monthsToShow, planningView, summaryByPeriod, visibleCarryColumns.length]);
+  }, [carryFooterTotals, monthsToShow, planningView, summaryByPeriod, visibleCarryColumns.length]);
 
   const handleVerticalScroll = useCallback(() => {
     if (auditTooltip || auditHoverTimerRef.current !== null) closeAuditTooltip();

@@ -55,7 +55,67 @@ function assert(condition, message) {
   });
   assert(invalidFormatData.keyForNoCRM === 'bad/key/format', 'invalid format should keep raw Excel key');
   assert(invalidFormatData.newKey.startsWith('IMP_RAW/'), 'invalid format should use IMP_RAW newKey prefix');
+  assert(invalidFormatData.soldToCode === '0', 'invalid format should not put company names into soldToCode');
+  assert(invalidFormatData.plantCode === '1104', 'explicit plant code column should still be kept');
   console.log('OK buildRegistrationCreateData raw key');
+
+  const validKeyData = buildRegistrationCreateData({
+    excelKeyForNoRegist: KEY_400212,
+    sourceSheet: 'Polymer',
+    sourceRow: 2,
+    soldToCode: 'Chuhatsu',
+    shipToCode: 'Yazaki',
+    endUserCode: 'Triumph',
+    plantCode: 'China',
+    materialCode: '400212',
+    onOffSpec: 'Off',
+    ownerName: 'IMPORT',
+    materialDescription: 'Material 400212',
+    countryName: null,
+    shipToName: 'Ship Name',
+    soldToName: 'Sold Name',
+    endUser: 'End User',
+    plantName: 'Plant Name',
+    process: null,
+    application: null,
+    subApp: null,
+    hasImportedPrice: false,
+    pendingForecastRecords: [],
+  });
+  assert(validKeyData.soldToCode === '10976', 'valid key should use soldTo code from key not Excel name');
+  assert(validKeyData.plantCode === '1104', 'valid key should use plant code from key not Excel country');
+  assert(validKeyData.soldToName === 'Sold Name', 'valid key should keep soldTo name separate');
+  console.log('OK buildRegistrationCreateData separates codes and names');
+
+  const partialKeyData = buildRegistrationCreateData({
+    excelKeyForNoRegist: '///1110/401098/On',
+    sourceSheet: 'CP',
+    sourceRow: 9,
+    soldToCode: '0',
+    shipToCode: '0',
+    endUserCode: '0',
+    plantCode: '0',
+    materialCode: '401098',
+    onOffSpec: 'On',
+    ownerName: '2026',
+    materialDescription: 'Material 401098',
+    countryName: 'Injection',
+    shipToName: 'Ferrero',
+    soldToName: null,
+    endUser: 'Nopparat',
+    plantName: 'India',
+    process: 'Injection',
+    application: null,
+    subApp: null,
+    hasImportedPrice: false,
+    pendingForecastRecords: [],
+  });
+  assert(partialKeyData.plantCode === '1110', 'partial key should still extract plant code');
+  assert(partialKeyData.materialCode === '401098', 'partial key should still extract material code');
+  assert(partialKeyData.soldToCode === '0', 'partial key without soldTo should stay 0');
+  assert(partialKeyData.ownerName === 'Nopparat', 'planning year owner should fall back to PIC/end user');
+  assert(partialKeyData.countryName === 'India', 'swapped country/process fields should be repaired');
+  console.log('OK buildRegistrationCreateData partial CP key');
 }
 
 const excelPath = 'tmp-upload-fcst-nyl.xlsx';

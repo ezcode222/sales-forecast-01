@@ -17,6 +17,7 @@ import {
   normalizeKey,
   parseForecastMonthColumn,
   parseForecastNumber,
+  resolveImportMetadataColumns,
 } from './excelUtils';
 import type {
   ExcelForecastGroup,
@@ -157,6 +158,7 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
   }));
   const { columns: forecastColumns, hasPriceColumns, hasAmountColumns } = buildVersionedForecastColumns(header);
   const businessUnitColumnIndex = findHeaderIndex(header, ['BU', 'Business Unit', 'BusinessUnit']);
+  const metadataColumns = resolveImportMetadataColumns(header);
 
   if (normalizeHeader(header[0]) !== KEY_HEADER) {
     headerErrors.push({
@@ -233,17 +235,17 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
 
     group.sourceRows.push(sourceRow);
     group.sourceSheetRows.push({ sourceSheet: sheetName, sourceRow });
-    group.country = firstValue(group.country, row[19]);
-    group.soldTo = firstValue(group.soldTo, row[25]);
-    group.shipTo = firstValue(group.shipTo, row[26]);
-    group.enduser = firstValue(group.enduser, row[27]);
-    group.plant = firstValue(group.plant, row[17]);
-    group.materialCode = firstValue(group.materialCode, row[6]);
-    group.onOff = firstValue(group.onOff, row[20]) ?? getOnOffFromKey(key);
-    group.process = firstValue(group.process, row[21]);
-    group.application = firstValue(group.application, row[22]);
-    group.subApplication = firstValue(group.subApplication, row[23]);
-    group.owner = firstValue(group.owner, row[30]);
+    group.country = firstValue(group.country, row[metadataColumns.country]);
+    group.soldTo = firstValue(group.soldTo, row[metadataColumns.soldTo]);
+    group.shipTo = firstValue(group.shipTo, row[metadataColumns.shipTo]);
+    group.enduser = firstValue(group.enduser, row[metadataColumns.enduser]);
+    group.plant = firstValue(group.plant, row[metadataColumns.plantCode]);
+    group.materialCode = firstValue(group.materialCode, row[metadataColumns.materialCode]);
+    group.onOff = firstValue(group.onOff, row[metadataColumns.onOff]) ?? getOnOffFromKey(key);
+    group.process = firstValue(group.process, row[metadataColumns.process]);
+    group.application = firstValue(group.application, row[metadataColumns.application]);
+    group.subApplication = firstValue(group.subApplication, row[metadataColumns.subApplication]);
+    group.owner = firstValue(group.owner, row[metadataColumns.owner]);
     group.businessUnit = firstValue(
       group.businessUnit,
       businessUnitColumnIndex >= 0 ? row[businessUnitColumnIndex] : null

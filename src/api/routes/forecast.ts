@@ -51,6 +51,7 @@ interface ForecastSummaryPeriod {
   period: string;
   qtyAct: number;
   qtyFcst: number;
+  amountFcst: number;
   carryInETD: number;
   carryOutETD: number;
   carryInLoading: number;
@@ -245,6 +246,7 @@ function createEmptySummary(period: string): ForecastSummaryPeriod {
     period,
     qtyAct: 0,
     qtyFcst: 0,
+    amountFcst: 0,
     carryInETD: 0,
     carryOutETD: 0,
     carryInLoading: 0,
@@ -464,7 +466,7 @@ async function loadForecastSummaryRows(
   const periodsJson = JSON.stringify(periods);
 
   if (granularity === 'month') {
-    return prisma.$queryRaw<Array<{ period: string; qtyFcst: unknown }>>`
+    return prisma.$queryRaw<Array<{ period: string; qtyFcst: unknown; amountFcst: unknown }>>`
       WITH requested_ids AS (
         SELECT CAST([value] AS NVARCHAR(200)) AS registrationId
         FROM OPENJSON(${registrationIdsJson})
@@ -474,7 +476,16 @@ async function loadForecastSummaryRows(
         FROM OPENJSON(${periodsJson})
       ),
       dated_by_month AS (
-        SELECT forecast.registrationId, FORMAT(forecast.period, 'yyyy-MM') AS period, SUM(forecast.qtyFcst) AS qtyFcst
+        SELECT
+          forecast.registrationId,
+          FORMAT(forecast.period, 'yyyy-MM') AS period,
+          SUM(forecast.qtyFcst) AS qtyFcst,
+          SUM(
+            CASE
+              WHEN forecast.amountFcst > 0 THEN forecast.amountFcst
+              ELSE forecast.qtyFcst * forecast.priceFcst
+            END
+          ) AS amountFcst
         FROM dbo.forecast_values forecast
         INNER JOIN requested_ids requested
           ON requested.registrationId = forecast.registrationId
@@ -485,7 +496,14 @@ async function loadForecastSummaryRows(
         GROUP BY forecast.registrationId, FORMAT(forecast.period, 'yyyy-MM')
       ),
       monthly_rows AS (
-        SELECT forecast.registrationId, FORMAT(forecast.period, 'yyyy-MM') AS period, forecast.qtyFcst
+        SELECT
+          forecast.registrationId,
+          FORMAT(forecast.period, 'yyyy-MM') AS period,
+          forecast.qtyFcst,
+          CASE
+            WHEN forecast.amountFcst > 0 THEN forecast.amountFcst
+            ELSE forecast.qtyFcst * forecast.priceFcst
+          END AS amountFcst
         FROM dbo.forecast_values forecast
         INNER JOIN requested_ids requested
           ON requested.registrationId = forecast.registrationId
@@ -499,7 +517,11 @@ async function loadForecastSummaryRows(
         SUM(CASE
           WHEN dated_by_month.qtyFcst IS NOT NULL THEN dated_by_month.qtyFcst
           ELSE ISNULL(monthly_rows.qtyFcst, 0)
-        END) AS qtyFcst
+        END) AS qtyFcst,
+        SUM(CASE
+          WHEN dated_by_month.amountFcst IS NOT NULL THEN dated_by_month.amountFcst
+          ELSE ISNULL(monthly_rows.amountFcst, 0)
+        END) AS amountFcst
       FROM requested_periods
       CROSS JOIN requested_ids
       LEFT JOIN dated_by_month
@@ -627,6 +649,14 @@ async function buildForecastSummary(
     });
   }
 
+  const scopedRegistrationIds = Array.isArray(body.registrationIds)
+    ? [...new Set(body.registrationIds.map(String).filter(Boolean))]
+    : [];
+  if (scopedRegistrationIds.length > 0) {
+    const scopedSet = new Set(scopedRegistrationIds);
+    registrationIds = registrationIds.filter(id => scopedSet.has(id));
+  }
+
   const summaryByPeriod = new Map(
     periods.map(period => [period, createEmptySummary(period)])
   );
@@ -648,7 +678,9 @@ async function buildForecastSummary(
 
   forecastRows.forEach(row => {
     const summary = summaryByPeriod.get(String(row.period));
-    if (summary) summary.qtyFcst = Number(row.qtyFcst ?? 0);
+    if (!summary) return;
+    summary.qtyFcst = Number(row.qtyFcst ?? 0);
+    summary.amountFcst = Number((row as { amountFcst?: unknown }).amountFcst ?? 0);
   });
 
   return {
