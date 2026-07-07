@@ -113,6 +113,62 @@ export function findHeaderIndex(header: unknown[], aliases: string[]) {
   return header.findIndex(value => normalizedAliases.has(normalizeHeader(value).toUpperCase()));
 }
 
+export type ImportSheetLayout = 'polymer' | 'cp';
+
+export interface ImportMetadataColumns {
+  layout: ImportSheetLayout;
+  materialCode: number;
+  plantCode: number;
+  country: number;
+  onOff: number;
+  process: number;
+  application: number;
+  subApplication: number;
+  soldTo: number;
+  shipTo: number;
+  enduser: number;
+  owner: number;
+}
+
+const POLYMER_METADATA_COLUMNS: ImportMetadataColumns = {
+  layout: 'polymer',
+  materialCode: 6,
+  plantCode: 17,
+  country: 19,
+  onOff: 20,
+  process: 21,
+  application: 22,
+  subApplication: 23,
+  soldTo: 25,
+  shipTo: 26,
+  enduser: 27,
+  owner: 30,
+};
+
+const CP_METADATA_COLUMNS: ImportMetadataColumns = {
+  layout: 'cp',
+  materialCode: 5,
+  plantCode: 15,
+  country: 17,
+  onOff: 18,
+  process: 19,
+  application: 20,
+  subApplication: 21,
+  soldTo: 24,
+  shipTo: 25,
+  enduser: 26,
+  owner: 27,
+};
+
+export function resolveImportMetadataColumns(header: unknown[]): ImportMetadataColumns {
+  const secondColumn = normalizeHeader(header[1]).toUpperCase();
+  if (secondColumn === 'H/C') return POLYMER_METADATA_COLUMNS;
+  if (secondColumn === 'CODE') return CP_METADATA_COLUMNS;
+  if (findHeaderIndex(header, ['PIC']) >= 0) return CP_METADATA_COLUMNS;
+  if (findHeaderIndex(header, ['H/C']) >= 0) return POLYMER_METADATA_COLUMNS;
+  return POLYMER_METADATA_COLUMNS;
+}
+
 export function parseForecastNumber(value: unknown) {
   if (value === null || value === undefined || value === '') return { ok: true as const, value: 0 };
   if (typeof value === 'number') {

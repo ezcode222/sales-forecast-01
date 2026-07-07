@@ -5,6 +5,7 @@ import { getRegistrationSourceSql } from './registrations';
 
 const router = Router();
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const QUERY_CACHE_TTL_MS = 60 * 1000;
 const INVENTORY_DATABASE_URL = process.env.INVENTORY_DATABASE_URL ??
   'sqlserver://thrygsd002:1433;database=UBE_DW;user=dwuser;password=dwuser;encrypt=true;trustServerCertificate=true';
 const INVENTORY_VIEW = Prisma.raw(process.env.INVENTORY_VIEW_NAME ?? '[dbo].[MKT_NYL_Current_INV]');
@@ -30,6 +31,14 @@ interface InventoryApiRow {
 }
 
 let inventoryCache: { expiresAt: number; promise: Promise<InventoryApiRow[]> } | null = null;
+const inventoryQueryCache = new Map<
+  string,
+  { expiresAt: number; promise: Promise<InventoryApiRow[]> }
+>();
+
+function inventoryQueryCacheKey(registrationIds: string[]) {
+  return registrationIds.slice().sort().join('|');
+}
 
 function normalizeQuantity(value: unknown) {
   const parsed = Number(value ?? 0);
@@ -218,8 +227,25 @@ async function loadInventoryRowsForRegistrationIds(registrationIds: string[]) {
 
 router.post('/query', async (req, res) => {
   const registrationIds = normalizeRegistrationIds(req.body?.registrationIds);
+  if (registrationIds.length === 0) {
+    return res.json([]);
+  }
+
+  const cacheKey = inventoryQueryCacheKey(registrationIds);
+  let cached = inventoryQueryCache.get(cacheKey);
+  if (!cached || cached.expiresAt <= Date.now()) {
+    cached = {
+      expiresAt: Date.now() + QUERY_CACHE_TTL_MS,
+      promise: loadInventoryRowsForRegistrationIds(registrationIds).catch(error => {
+        inventoryQueryCache.delete(cacheKey);
+        throw error;
+      }),
+    };
+    inventoryQueryCache.set(cacheKey, cached);
+  }
+
   try {
-    res.json(await loadInventoryRowsForRegistrationIds(registrationIds));
+    res.json(await cached.promise);
   } catch (error) {
     console.error('[inventory] query error:', error);
     res.status(500).json({

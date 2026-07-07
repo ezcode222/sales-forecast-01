@@ -18,13 +18,106 @@ import type { ExtendedForecastColumn } from './excelUtils';
 
 export const EXCEL_IMPORT_CREATED_BY = 'excel-import';
 
+const PLANT_CODE_PATTERN = /^\d{4}(-[A-Za-z0-9]+)?$/;
+const REGISTRATION_CODE_PATTERN = /^\d+$/;
+
 function truncate(value: string, maxLength: number) {
   return value.length <= maxLength ? value : value.slice(0, maxLength);
 }
 
-function hasValidSixSegmentKey(rawKey: string) {
+export function hasValidSixSegmentKey(rawKey: string) {
   const parsed = parseExcelKey(rawKey);
   return parsed.segmentCount === 6 && detectEmptyKeySegments(parsed).length === 0;
+}
+
+export function isLikelyPlantCode(value: unknown) {
+  const normalized = text(value);
+  return PLANT_CODE_PATTERN.test(normalized);
+}
+
+export function isLikelyRegistrationCode(value: unknown) {
+  const normalized = text(value);
+  if (!normalized || normalized === '0') return false;
+  return REGISTRATION_CODE_PATTERN.test(normalized);
+}
+
+function registrationCodeOrZero(value: unknown) {
+  const normalized = text(value);
+  return normalized || '0';
+}
+
+export function parseRegistrationCodesFromKey(rawKey: string) {
+  const parsed = parseExcelKey(rawKey);
+  const emptySegments = detectEmptyKeySegments(parsed);
+  const plantCode = isLikelyPlantCode(parsed.plant) ? parsed.plant : '0';
+  const materialFromKey = registrationCodeOrZero(parsed.material);
+  return {
+    soldToCode: isLikelyRegistrationCode(parsed.soldTo) ? parsed.soldTo : '0',
+    shipToCode: isLikelyRegistrationCode(parsed.shipTo) ? parsed.shipTo : '0',
+    endUserCode: isLikelyRegistrationCode(parsed.enduser) ? parsed.enduser : '0',
+    plantCode,
+    materialCode: materialFromKey !== '0' ? materialFromKey : '0',
+    onOffSpec: canonicalOnOff(parsed.onOff),
+    hasValidSixSegments: emptySegments.length === 0,
+  };
+}
+
+function isLikelyPlanningYear(value: unknown) {
+  return /^20[2-3]\d$/.test(text(value));
+}
+
+function isProcessLabel(value: unknown) {
+  const normalized = text(value).toLowerCase();
+  return normalized === 'injection' || normalized === 'extrusion' || normalized === 'mb';
+}
+
+function resolveOwnerName(candidate: AutoCreateRegistrationPackage) {
+  const ownerFromExcel = text(candidate.ownerName);
+  if (ownerFromExcel && !isLikelyPlanningYear(ownerFromExcel)) {
+    return ownerFromExcel;
+  }
+  const picFromMisplacedColumn = text(candidate.endUser);
+  if (picFromMisplacedColumn && !isLikelyPlanningYear(picFromMisplacedColumn)) {
+    return picFromMisplacedColumn;
+  }
+  return ownerFromExcel || 'IMPORT';
+}
+
+function resolveCountryAndPlantNames(candidate: AutoCreateRegistrationPackage) {
+  let countryName = nullableText(candidate.countryName);
+  let plantName = nullableText(candidate.plantName);
+
+  if (isProcessLabel(countryName) && plantName && !isLikelyPlantCode(plantName) && !isProcessLabel(plantName)) {
+    countryName = plantName;
+    plantName = null;
+  }
+
+  return { countryName, plantName };
+}
+
+function resolvePlantCodeFromExcel(plantValue: string | null, keyPlantCode: string) {
+  if (keyPlantCode !== '0') return keyPlantCode;
+  const plantText = text(plantValue);
+  return isLikelyPlantCode(plantText) ? plantText : '0';
+}
+
+function resolveExcelKeyForRepair(row: {
+  keyForNoCRM: string;
+  newKey: string;
+}) {
+  const keyForNoCRM = normalizeKey(row.keyForNoCRM);
+  if (hasValidSixSegmentKey(keyForNoCRM)) return keyForNoCRM;
+  if (keyForNoCRM && !keyForNoCRM.startsWith('IMP_RAW/')) return keyForNoCRM;
+
+  const newKey = normalizeKey(row.newKey);
+  if (newKey.startsWith('IMP_RAW/')) {
+    return newKey.slice('IMP_RAW/'.length);
+  }
+  const slashIndex = newKey.indexOf('/');
+  if (slashIndex >= 0) {
+    return newKey.slice(slashIndex + 1);
+  }
+  return keyForNoCRM;
 }
 
 function text(value: unknown) {
@@ -46,16 +139,27 @@ function canonicalOnOff(value: unknown) {
 
 export function buildRegistrationCreateData(candidate: AutoCreateRegistrationPackage) {
   const rawExcelKey = truncate(normalizeKey(candidate.excelKeyForNoRegist), 500);
-  const parsed = parseExcelKey(rawExcelKey);
-  const ownerName = text(candidate.ownerName) || 'IMPORT';
-  const plantCode = text(candidate.plantCode) || text(parsed.plant) || '0';
-  const materialCode = text(candidate.materialCode) || text(parsed.material) || '0';
+  const codesFromKey = parseRegistrationCodesFromKey(rawExcelKey);
+  const { countryName, plantName } = resolveCountryAndPlantNames(candidate);
+  const ownerName = resolveOwnerName(candidate);
+  const soldToCode = isLikelyRegistrationCode(candidate.soldToCode)
+    ? text(candidate.soldToCode)
+    : codesFromKey.soldToCode;
+  const shipToCode = isLikelyRegistrationCode(candidate.shipToCode)
+    ? text(candidate.shipToCode)
+    : codesFromKey.shipToCode;
+  const endUserCode = isLikelyRegistrationCode(candidate.endUserCode)
+    ? text(candidate.endUserCode)
+    : codesFromKey.endUserCode;
+  const plantCode = resolvePlantCodeFromExcel(candidate.plantCode, codesFromKey.plantCode);
+  const materialCode = registrationCodeOrZero(candidate.materialCode) !== '0'
+    ? registrationCodeOrZero(candidate.materialCode)
+    : codesFromKey.materialCode;
   const materialDescription =
     text(candidate.materialDescription) || `Material ${materialCode}`;
-  const onOffSpec = canonicalOnOff(candidate.onOffSpec || parsed.onOff);
-  const soldToCode = text(candidate.soldToCode) || text(parsed.soldTo) || '0';
-  const shipToCode = text(candidate.shipToCode) || text(parsed.shipTo) || '0';
-  const endUserCode = text(candidate.endUserCode) || text(parsed.enduser) || '0';
+  const onOffSpec = canonicalOnOff(
+    candidate.onOffSpec !== 'Unspecified' ? candidate.onOffSpec : codesFromKey.onOffSpec
+  );
 
   if (hasValidSixSegmentKey(rawExcelKey)) {
     const keyForNoCRM = [soldToCode, shipToCode, endUserCode, plantCode, materialCode, onOffSpec].join('/');
@@ -74,11 +178,15 @@ export function buildRegistrationCreateData(candidate: AutoCreateRegistrationPac
       onOffSpec,
       materialDescription,
       ownerName,
-      countryName: nullableText(candidate.countryName),
+      countryName,
       shipToName: nullableText(candidate.shipToName),
-      soldToName: nullableText(candidate.soldToName),
+      soldToName: nullableText(candidate.soldToName)
+        ?? (!isLikelyRegistrationCode(candidate.soldToCode) ? nullableText(candidate.soldToCode) : null),
       endUser: nullableText(candidate.endUser),
-      plantName: nullableText(candidate.plantName),
+      plantName: plantName
+        ?? (!isLikelyPlantCode(candidate.plantCode) && text(candidate.plantCode) !== '0'
+          ? nullableText(candidate.plantCode)
+          : null),
       process: nullableText(candidate.process),
       application: nullableText(candidate.application),
       subApp: nullableText(candidate.subApp),
@@ -107,11 +215,15 @@ export function buildRegistrationCreateData(candidate: AutoCreateRegistrationPac
     onOffSpec,
     materialDescription,
     ownerName,
-    countryName: nullableText(candidate.countryName),
+    countryName,
     shipToName: nullableText(candidate.shipToName),
-    soldToName: nullableText(candidate.soldToName),
+    soldToName: nullableText(candidate.soldToName)
+      ?? (!isLikelyRegistrationCode(candidate.soldToCode) ? nullableText(candidate.soldToCode) : null),
     endUser: nullableText(candidate.endUser),
-    plantName: nullableText(candidate.plantName),
+    plantName: plantName
+      ?? (!isLikelyPlantCode(candidate.plantCode) && text(candidate.plantCode) !== '0'
+        ? nullableText(candidate.plantCode)
+        : null),
     process: nullableText(candidate.process),
     application: nullableText(candidate.application),
     subApp: nullableText(candidate.subApp),
@@ -158,26 +270,87 @@ async function findDuplicateRegistration(rawExcelKey: string, newKey: string, ke
   return null;
 }
 
+export function buildRepairManagedRegistrationData(row: {
+  keyForNoCRM: string;
+  newKey: string;
+  ownerName: string | null;
+  materialDescription: string | null;
+  countryName: string | null;
+  shipToName: string | null;
+  soldToName: string | null;
+  endUser: string | null;
+  plantName: string | null;
+  soldToCode: string;
+  shipToCode: string;
+  endUserCode: string;
+  plantCode: string;
+  materialCode: string;
+  onOffSpec: string;
+  process: string | null;
+  application: string | null;
+  subApp: string | null;
+  hasImportedPrice: boolean;
+}) {
+  const excelKey = resolveExcelKeyForRepair(row);
+  const misplacedSoldToName = !isLikelyRegistrationCode(row.soldToCode) ? nullableText(row.soldToCode) : null;
+  const misplacedShipToName = !isLikelyRegistrationCode(row.shipToCode) ? nullableText(row.shipToCode) : null;
+  const misplacedEndUserCode = !isLikelyRegistrationCode(row.endUserCode) ? nullableText(row.endUserCode) : null;
+  const misplacedPlantName = !isLikelyPlantCode(row.plantCode) ? nullableText(row.plantCode) : null;
+  const misplacedCountryName = !isLikelyPlantCode(row.plantCode) && !row.plantName
+    ? nullableText(row.plantCode)
+    : null;
+
+  return buildRegistrationCreateData({
+    excelKeyForNoRegist: excelKey,
+    sourceSheet: '',
+    sourceRow: 0,
+    soldToCode: isLikelyRegistrationCode(row.soldToCode) ? row.soldToCode : '0',
+    shipToCode: isLikelyRegistrationCode(row.shipToCode) ? row.shipToCode : '0',
+    endUserCode: isLikelyRegistrationCode(row.endUserCode) ? row.endUserCode : '0',
+    plantCode: isLikelyPlantCode(row.plantCode) ? row.plantCode : '0',
+    materialCode: row.materialCode,
+    onOffSpec: row.onOffSpec,
+    ownerName: row.ownerName,
+    materialDescription: row.materialDescription,
+    countryName: row.countryName ?? misplacedCountryName,
+    shipToName: row.shipToName ?? misplacedShipToName,
+    soldToName: row.soldToName ?? misplacedSoldToName,
+    endUser: row.endUser ?? misplacedEndUserCode,
+    plantName: row.plantName ?? misplacedPlantName,
+    process: row.process,
+    application: row.application,
+    subApp: row.subApp,
+    hasImportedPrice: row.hasImportedPrice,
+    pendingForecastRecords: [],
+  });
+}
+
 function buildPackageBase(
   group: ExcelForecastGroup,
-  pendingForecastRecords: PendingImportForecastRecord[]
+  pendingForecastRecords: PendingImportForecastRecord[],
 ): Omit<AutoCreateRegistrationPackage, 'excelKeyForNoRegist' | 'sourceSheet' | 'sourceRow'> {
-  const parsed = parseExcelKey(group.keyNoRegist);
+  const codes = parseRegistrationCodesFromKey(group.keyNoRegist);
   const hasImportedPrice = group.priceValues.some(value => value > 0);
+  const materialFromExcel = text(group.materialCode);
+  const plantFromExcel = text(group.plant);
+  const plantCodeFromExcel = isLikelyPlantCode(plantFromExcel) ? plantFromExcel : null;
+  const plantNameFromExcel = plantCodeFromExcel ? null : nullableText(group.plant);
   return {
-    soldToCode: parsed.soldTo || text(group.soldTo) || '0',
-    shipToCode: parsed.shipTo || text(group.shipTo) || '0',
-    endUserCode: parsed.enduser || text(group.enduser) || '0',
-    plantCode: parsed.plant || text(group.plant) || '0',
-    materialCode: parsed.material || text(group.materialCode) || '0',
-    onOffSpec: canonicalOnOff(parsed.onOff || group.onOff),
+    soldToCode: codes.soldToCode,
+    shipToCode: codes.shipToCode,
+    endUserCode: codes.endUserCode,
+    plantCode: codes.plantCode !== '0' ? codes.plantCode : (plantCodeFromExcel ?? '0'),
+    materialCode: codes.materialCode !== '0' ? codes.materialCode : (materialFromExcel || '0'),
+    onOffSpec: codes.onOffSpec !== 'Unspecified'
+      ? codes.onOffSpec
+      : canonicalOnOff(group.onOff),
     ownerName: group.owner,
-    materialDescription: group.materialCode ? `Material ${group.materialCode}` : null,
+    materialDescription: materialFromExcel ? `Material ${materialFromExcel}` : null,
     countryName: group.country,
     shipToName: group.shipTo,
     soldToName: group.soldTo,
     endUser: group.enduser,
-    plantName: group.plant,
+    plantName: plantNameFromExcel,
     process: group.process,
     application: group.application,
     subApp: group.subApplication,

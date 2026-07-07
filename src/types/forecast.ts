@@ -202,6 +202,7 @@ export interface ForecastSummaryRequest {
   formulaFilter: string[];
   formulaOverrides: Record<string, string>;
   carryFilters: Record<string, string[]>;
+  registrationIds?: string[];
 }
 
 export interface InventoryRow {

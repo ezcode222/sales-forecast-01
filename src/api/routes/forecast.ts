@@ -627,6 +627,14 @@ async function buildForecastSummary(
     });
   }
 
+  const scopedRegistrationIds = Array.isArray(body.registrationIds)
+    ? [...new Set(body.registrationIds.map(String).filter(Boolean))]
+    : [];
+  if (scopedRegistrationIds.length > 0) {
+    const scopedSet = new Set(scopedRegistrationIds);
+    registrationIds = registrationIds.filter(id => scopedSet.has(id));
+  }
+
   const summaryByPeriod = new Map(
     periods.map(period => [period, createEmptySummary(period)])
   );
