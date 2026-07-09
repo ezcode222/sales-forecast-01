@@ -2,8 +2,11 @@ import { Prisma } from '@prisma/client';
 import { Router } from 'express';
 import prisma from '../../db/prisma';
 import { clearActualCaches } from './actuals';
-import { getActiveSnapshotVersion } from '../services/dataSnapshot';
+import { isIncompleteManagedRegistration } from '../services/registrationIdentity';
+import { resolveManagedRegistrationUpdate } from '../services/registrationResolver';
+import { upsertRegistrationSpread } from '../services/registrationPricing';
 import { businessUnitFromPlantCode, crmBusinessUnitSelectSql } from '../services/businessUnit';
+import { getActiveSnapshotVersion } from '../services/dataSnapshot';
 
 const router = Router();
 const DEFAULT_PAGE_SIZE = 80;
@@ -39,10 +42,13 @@ const managedRegistrationSourceSql = Prisma.sql`
     r.application AS Application, r.subApp AS SubApp, r.zoneName AS ZoneName,
     r.plantName AS PlantName, r.countryCode AS CountryCode, r.endUserCode AS EndUserCode,
     r.endUserExportControl AS EndUserExportControl, r.endUserName AS EndUserName,
-    r.productName AS ProductName, r.priceFormula AS PriceFormula, r.spread AS Spread,
+    r.productName AS ProductName, r.priceFormula AS PriceFormula,
+    COALESCE(rps.spread, r.spread, 0) AS Spread,
     r.businessUnit AS BusinessUnit, r.createdBy AS CreatedBy,
     CAST(1 AS BIT) AS IsManaged
   FROM dbo.master_data_crm_registrations r
+  LEFT JOIN dbo.registration_price_settings rps
+    ON rps.registrationId = r.id
   WHERE r.mainRegist = 1
 `;
 
@@ -72,10 +78,12 @@ export async function getRegistrationSourceSql() {
         r.countryCode AS CountryCode, r.endUserCode AS EndUserCode,
         r.endUserExportControl AS EndUserExportControl, r.endUserName AS EndUserName,
         r.productName AS ProductName, CAST('' AS NVARCHAR(50)) AS PriceFormula,
-        CAST(0 AS DECIMAL(18,4)) AS Spread, r.businessUnit AS BusinessUnit,
+        COALESCE(rps.spread, 0) AS Spread, r.businessUnit AS BusinessUnit,
         CAST('' AS NVARCHAR(100)) AS CreatedBy,
         CAST(0 AS BIT) AS IsManaged
       FROM dbo.crm_registration_snapshot r
+      LEFT JOIN dbo.registration_price_settings rps
+        ON rps.registrationId = r.registrationId
       WHERE r.snapshotVersion = ${snapshotVersion}
     `
     : Prisma.sql`
@@ -103,11 +111,13 @@ export async function getRegistrationSourceSql() {
     r.ZoneName, r.PlantName, r.CountryCode, r.EndUserCode,
     r.EndUserExportControl, r.EndUserName, r.ProductName,
     CAST('' AS NVARCHAR(50)) AS PriceFormula,
-    CAST(0 AS DECIMAL(18,4)) AS Spread,
+    COALESCE(rps.spread, 0) AS Spread,
     ${directCrmBusinessUnitSql},
     CAST('' AS NVARCHAR(100)) AS CreatedBy,
     CAST(0 AS BIT) AS IsManaged
   FROM [dbo].[VW_CRM_RegistrationAll_1] r
+  LEFT JOIN [dbo].[registration_price_settings] rps
+    ON rps.registrationId = CAST(r.NewKey AS NVARCHAR(200))
   WHERE r.NewKey IS NOT NULL AND r.MainRegist = 1
     `;
 
@@ -394,6 +404,16 @@ function mapRegistrationRow(row: Record<string, unknown>) {
     productName: String(row.ProductName ?? row.productName ?? ''),
     column1: String(row.NewKey ?? row.newKey ?? ''),
     createdBy: scalarToString(row.CreatedBy ?? row.createdBy),
+    isIncomplete: isIncompleteManagedRegistration({
+      createdBy: scalarToString(row.CreatedBy ?? row.createdBy),
+      newKey: String(row.NewKey ?? row.newKey ?? ''),
+      keyForNoCRM: String(row.KeyforNoCRM ?? row.keyForNoCRM ?? ''),
+      soldToCode: String(row.SoldToCode ?? row.soldToCode ?? ''),
+      shipToCode: String(row.ShipToCode ?? row.shipToCode ?? ''),
+      endUserCode: String(row.EndUserCode ?? row.endUserCode ?? ''),
+      plantCode: String(row.PlantCode ?? row.plantCode ?? ''),
+      materialCode: String(row.MaterialCode ?? row.materialCode ?? ''),
+    }),
     carryInETD: 0,
     carryOutETD: 0,
     carryInLoading: 0,
@@ -616,6 +636,25 @@ router.post('/', async (req, res) => {
   }
 });
 
+router.patch('/:id/spread', async (req, res) => {
+  try {
+    const updatedBy = typeof req.body?.updatedBy === 'string' ? req.body.updatedBy : undefined;
+    const result = await upsertRegistrationSpread(req.params.id, req.body?.spread, updatedBy);
+    clearRegistrationDependentCaches();
+    res.json(result);
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error
+      ? String((error as { code?: string }).code)
+      : undefined;
+    const message = error instanceof Error ? error.message : 'Failed to update spread';
+    if (code === 'VALIDATION') {
+      return res.status(400).json({ error: message, code });
+    }
+    console.error('[registrations] spread PATCH error:', error);
+    res.status(500).json({ error: 'Failed to update spread' });
+  }
+});
+
 router.patch('/:id', async (req, res) => {
   try {
     const existing = await prisma.masterDataCrmRegistration.findUnique({
@@ -623,44 +662,30 @@ router.patch('/:id', async (req, res) => {
     });
     if (!existing) return res.status(404).json({ error: 'New registration not found' });
 
-    const changedKeyFields = [...keyFields].filter(field =>
-      req.body?.[field] !== undefined &&
-      text(req.body[field]) !== text(existing[field as keyof typeof existing])
-    );
-    if (changedKeyFields.length > 0) {
-      return res.status(400).json({
-        error: `Key fields cannot be changed: ${changedKeyFields.join(', ')}`,
-        code: 'KEY_FIELDS_LOCKED',
+    const result = await resolveManagedRegistrationUpdate(existing, req.body ?? {});
+    clearRegistrationDependentCaches();
+
+    if (result.action === 'merged_to_crm') {
+      return res.json({
+        action: 'merged_to_crm',
+        crmRegistrationId: result.crmRegistrationId,
+        forecastsMoved: result.forecastsMoved,
+        removedManagedId: result.removedManagedId,
       });
     }
 
-    const data: Record<string, unknown> = {};
-    if (req.body.materialDescription !== undefined) {
-      const value = text(req.body.materialDescription);
-      if (!value) return res.status(400).json({ error: 'Material Description is required' });
-      data.materialDescription = value;
-    }
-    if (req.body.ownerName !== undefined) {
-      const value = text(req.body.ownerName);
-      if (!value) return res.status(400).json({ error: 'Owner Name is required' });
-      data.ownerName = value;
-    }
-    for (const field of optionalTextFields) {
-      const bodyKey = optionalBodyKeys[field];
-      if (req.body[bodyKey] !== undefined) data[field] = nullableText(req.body[bodyKey]);
-    }
-    for (const field of ['commission', 'commissionIndirect', 'commissionFinancialDiscount', 'spread'] as const) {
-      if (req.body[field] !== undefined) data[field] = decimalValue(req.body[field]);
-    }
-    if (req.body.priceFormula !== undefined) data.priceFormula = text(req.body.priceFormula) || 'CPL';
-
-    const row = await prisma.masterDataCrmRegistration.update({
-      where: { id: req.params.id },
-      data,
-    });
-    clearRegistrationDependentCaches();
-    res.json(mapRegistrationRow({ ...row, isManaged: true }));
+    res.json(mapRegistrationRow({ ...result.row, isManaged: true }));
   } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error
+      ? String((error as { code?: string }).code)
+      : undefined;
+    const message = error instanceof Error ? error.message : 'Failed to update registration';
+    if (code === 'KEY_FIELDS_LOCKED' || code === 'INCOMPLETE_KEY_FIELDS' || code === 'DUPLICATE_REGISTRATION') {
+      return res.status(400).json({ error: message, code });
+    }
+    if (code === 'VALIDATION') {
+      return res.status(400).json({ error: message });
+    }
     console.error('[registrations] PATCH error:', error);
     res.status(500).json({ error: 'Failed to update registration' });
   }

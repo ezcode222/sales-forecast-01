@@ -4,13 +4,14 @@ import { AnimatePresence, motion } from 'motion/react';
 import { cn } from '../../lib/utils';
 import {
   PRICE_FORMULA_OPTIONS,
+  isManagedRegistrationMerge,
+  type ManagedRegistrationUpdateResponse,
   type PriceFormula,
   type Registration,
   type RegColumnKey,
 } from '../../types/forecast';
+import { EXCEL_IMPORT_CREATED_BY } from '../../lib/registrationIncomplete';
 import { ALL_REG_COLUMNS } from './regTableColumns';
-
-const EXCEL_IMPORT_CREATED_BY = 'excel-import';
 type RegistrationSourceFilter = 'all' | 'manual' | 'import';
 
 const REQUIRED_FIELDS: Array<{ key: RegColumnKey; label: string }> = [
@@ -27,6 +28,15 @@ const NUMERIC_FIELDS = new Set<RegColumnKey>([
 ]);
 
 const REQUIRED_KEYS = new Set<RegColumnKey>(REQUIRED_FIELDS.map(field => field.key));
+const KEY_FIELD_LABELS: Partial<Record<RegColumnKey, string>> = {
+  registrationTopic: 'Registration Topic',
+  soldToCode: 'Sold To Code',
+  shipToCode: 'Ship To Code',
+  endUserCode: 'End User Code',
+  plantCode: 'Plant Code',
+  materialCode: 'Material Code',
+  onOffSpec: 'On/Off Spec',
+};
 const KEY_FIELDS = new Set<RegColumnKey>([
   'registrationTopic',
   'soldToCode',
@@ -36,6 +46,15 @@ const KEY_FIELDS = new Set<RegColumnKey>([
   'materialCode',
   'onOffSpec',
 ]);
+const INCOMPLETE_KEY_FIELDS: Array<{ key: RegColumnKey; label: string }> = [
+  { key: 'registrationTopic', label: KEY_FIELD_LABELS.registrationTopic! },
+  { key: 'soldToCode', label: KEY_FIELD_LABELS.soldToCode! },
+  { key: 'shipToCode', label: KEY_FIELD_LABELS.shipToCode! },
+  { key: 'endUserCode', label: KEY_FIELD_LABELS.endUserCode! },
+  { key: 'plantCode', label: KEY_FIELD_LABELS.plantCode! },
+  { key: 'materialCode', label: KEY_FIELD_LABELS.materialCode! },
+  { key: 'onOffSpec', label: KEY_FIELD_LABELS.onOffSpec! },
+];
 const EXCLUDED_OPTIONAL_FIELDS = new Set<RegColumnKey>([
   ...REQUIRED_KEYS,
   'carryInETD',
@@ -489,7 +508,7 @@ export function ManageRegistrationPanel({
   open: boolean;
   registrations: Registration[];
   onClose: () => void;
-  onUpdate: (registration: Registration) => Promise<Registration>;
+  onUpdate: (registration: Registration) => Promise<ManagedRegistrationUpdateResponse>;
   onDelete: (registrationId: string) => Promise<void>;
 }>) {
   const [form, setForm] = useState<Registration | null>(null);
@@ -501,6 +520,7 @@ export function ManageRegistrationPanel({
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [mergeNotice, setMergeNotice] = useState('');
   const optionalFieldsRef = useRef<HTMLDivElement>(null);
 
   const optionalFields = useMemo(
@@ -544,6 +564,7 @@ export function ManageRegistrationPanel({
       setSubmitted(false);
       setSaving(false);
       setError('');
+      setMergeNotice('');
     }
   }, [open]);
 
@@ -584,17 +605,19 @@ export function ManageRegistrationPanel({
 
   const startEditing = (registration: Registration) => {
     setForm({ ...registration });
-    setSelectedOptionalFields(
-      optionalFields
-        .filter(field => {
-          const value = registration[field.key as keyof Registration];
-          if (field.key === 'priceFormula') return String(value || 'CPL') !== 'CPL';
-          return NUMERIC_FIELDS.has(field.key)
-            ? Number(value) !== 0
-            : String(value ?? '').trim() !== '';
-        })
-        .map(field => field.key)
-    );
+    const visibleOptional = optionalFields
+      .filter(field => {
+        const value = registration[field.key as keyof Registration];
+        if (field.key === 'priceFormula') return String(value || 'CPL') !== 'CPL';
+        return NUMERIC_FIELDS.has(field.key)
+          ? Number(value) !== 0
+          : String(value ?? '').trim() !== '';
+      })
+      .map(field => field.key);
+    const keyFieldsForIncomplete = registration.isIncomplete
+      ? INCOMPLETE_KEY_FIELDS.map(field => field.key)
+      : [];
+    setSelectedOptionalFields([...new Set([...keyFieldsForIncomplete, ...visibleOptional])]);
     setShowOptionalFields(false);
     setSubmitted(false);
     setError('');
@@ -623,7 +646,10 @@ export function ManageRegistrationPanel({
   const submit = async () => {
     if (!form) return;
     setSubmitted(true);
-    const isValid = REQUIRED_FIELDS.every(field =>
+    const fieldsToValidate = form.isIncomplete
+      ? [...REQUIRED_FIELDS, ...INCOMPLETE_KEY_FIELDS]
+      : REQUIRED_FIELDS;
+    const isValid = fieldsToValidate.every(field =>
       String(form[field.key as keyof Registration] ?? '').trim()
     );
     if (!isValid) return;
@@ -631,13 +657,22 @@ export function ManageRegistrationPanel({
     setSaving(true);
     setError('');
     try {
-      const saved = await onUpdate({
+      const result = await onUpdate({
         ...form,
         isManaged: true,
         sourceStatus: 'registration_only',
         priceFormula: form.priceFormula || 'CPL',
       });
-      startEditing(saved);
+      if (isManagedRegistrationMerge(result)) {
+        setForm(null);
+        setSelectedOptionalFields([]);
+        setError('');
+        setMergeNotice(
+          `Merged into CRM registration. ${result.forecastsMoved} forecast row(s) moved.`
+        );
+        return;
+      }
+      startEditing(result);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Unable to update registration');
     } finally {
@@ -653,7 +688,7 @@ export function ManageRegistrationPanel({
   ) => {
     if (!form) return null;
     const value = form[key as keyof Registration];
-    const locked = KEY_FIELDS.has(key);
+    const locked = KEY_FIELDS.has(key) && !form.isIncomplete;
     const hasError = submitted && required && !String(value ?? '').trim();
     const fieldLabel = (
       <span className="mb-1 flex min-w-0 items-center justify-between gap-2 text-[9px] font-black uppercase text-slate-500">
@@ -822,6 +857,11 @@ export function ManageRegistrationPanel({
                   </div>
                 </div>
                 <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2.5">
+                  {mergeNotice && (
+                    <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[10px] font-semibold text-emerald-800">
+                      {mergeNotice}
+                    </p>
+                  )}
                   {filteredRegistrations.length === 0 ? (
                     <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white/80 px-4 py-10 text-center">
                       <FilePlus2 size={22} className="mb-2 text-slate-300" />
@@ -845,11 +885,18 @@ export function ManageRegistrationPanel({
                       >
                         <div className="flex items-start justify-between gap-2">
                           <p className="truncate text-xs font-semibold text-slate-800">{registration.materialDescription}</p>
-                          {registration.createdBy === EXCEL_IMPORT_CREATED_BY && (
-                            <span className="shrink-0 rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-amber-800">
-                              Import
-                            </span>
-                          )}
+                          <div className="flex shrink-0 flex-col items-end gap-1">
+                            {registration.isIncomplete && (
+                              <span className="rounded-md bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-rose-800">
+                                Needs review
+                              </span>
+                            )}
+                            {registration.createdBy === EXCEL_IMPORT_CREATED_BY && (
+                              <span className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-amber-800">
+                                Import
+                              </span>
+                            )}
+                          </div>
                         </div>
                         <p className="mt-0.5 truncate text-[10px] text-slate-500">
                           {registration.materialCode} / {registration.plantCode}
@@ -883,7 +930,11 @@ export function ManageRegistrationPanel({
                       <div className="mb-3 flex items-start justify-between gap-3">
                         <div>
                           <h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Registration details</h4>
-                          <p className="mt-0.5 text-[11px] text-slate-400">Key fields are locked to protect forecast references</p>
+                          <p className="mt-0.5 text-[11px] text-slate-400">
+                            {form.isIncomplete
+                              ? 'Complete key codes to match CRM. Names come from customer master, not Excel.'
+                              : 'Key fields are locked to protect forecast references'}
+                          </p>
                         </div>
                         <button
                           type="button"
@@ -909,6 +960,20 @@ export function ManageRegistrationPanel({
                         </button>
                       </div>
 
+                      {form.isIncomplete && (
+                        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/70 p-3">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-900">
+                            Incomplete import registration
+                          </p>
+                          <p className="mt-1 text-[11px] leading-relaxed text-amber-800">
+                            Fill in all key codes below. If the key matches CRM, forecasts will move to the CRM registration automatically.
+                          </p>
+                          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            {INCOMPLETE_KEY_FIELDS.map(field => renderInput(field.key, field.label, true))}
+                          </div>
+                        </div>
+                      )}
+
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         {REQUIRED_FIELDS.map(field => renderInput(field.key, field.label, true))}
                       </div>
@@ -922,7 +987,9 @@ export function ManageRegistrationPanel({
                             </span>
                           </div>
                           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                            {selectedOptionalFields.map(key => {
+                            {selectedOptionalFields
+                              .filter(key => !(form.isIncomplete && KEY_FIELDS.has(key)))
+                              .map(key => {
                               const definition = ALL_REG_COLUMNS.find(field => field.key === key);
                               return definition ? renderInput(key, definition.label, false, true) : null;
                             })}

@@ -21,6 +21,7 @@ import type {
   Dimension,
   ForecastValue,
   ForecastSummary,
+  ForecastLoadProgress,
   PriceFormula,
   Registration,
   RegColumnKey,
@@ -58,6 +59,9 @@ export interface ForecastInputTableProps {
   planningView: 'sale' | 'accounting' | 'production';
   formulaMap: Map<string, PriceFormula>;
   onFormulaChange: (regId: string, formula: PriceFormula) => void;
+  spreadMap: Map<string, number>;
+  onSpreadChange: (regId: string, spread: number) => void;
+  onSpreadCommit: (regId: string, spread: number) => void;
   formulaFilter: ColumnFilterValue;
   onFormulaFilterChange: (v: ColumnFilterValue) => void;
   naphthaprices: CPLPrice[];
@@ -66,6 +70,7 @@ export interface ForecastInputTableProps {
   onFixedPriceChange: (regId: string, month: string, price: number) => void;
   onAmountChange: (regId: string, month: string, amount: number) => void;
   isTableDataLoading: boolean;
+  forecastLoadProgress: ForecastLoadProgress | null;
   isLoadingMore: boolean;
   hasMoreRows: boolean;
   onLoadMore: () => void;
@@ -102,6 +107,9 @@ function ForecastInputTableComponent({
   planningView,
   formulaMap,
   onFormulaChange,
+  spreadMap,
+  onSpreadChange,
+  onSpreadCommit,
   formulaFilter,
   onFormulaFilterChange,
   naphthaprices,
@@ -110,6 +118,7 @@ function ForecastInputTableComponent({
   onFixedPriceChange,
   onAmountChange,
   isTableDataLoading,
+  forecastLoadProgress,
   isLoadingMore,
   hasMoreRows,
   onLoadMore,
@@ -121,6 +130,10 @@ function ForecastInputTableComponent({
   forecastAuditVersion,
   stampPeriod,
 }: ForecastInputTableProps) {
+  const isScopeDataLoading = isTableDataLoading || Boolean(
+    forecastLoadProgress?.active && forecastLoadProgress.version === selectedVersion,
+  );
+
   const {
     columnOrder,
     settingsOpen,
@@ -239,6 +252,10 @@ function ForecastInputTableComponent({
     resetScrollTop();
     setShowScrollLoader(false);
   }, [columnFilters, resetScrollTop]);
+
+  useEffect(() => {
+    resetScrollTop();
+  }, [selectedVersion, resetScrollTop]);
 
   const closeImportModal = useCallback(() => {
     setImportOpen(false);
@@ -439,6 +456,9 @@ function ForecastInputTableComponent({
             selectedDimension={selectedDimension}
             formulaMap={formulaMap}
             onFormulaChange={onFormulaChange}
+            spreadMap={spreadMap}
+            onSpreadChange={onSpreadChange}
+            onSpreadCommit={onSpreadCommit}
             formulaFilter={formulaFilter}
             onFormulaFilterChange={onFormulaFilterChange}
             loadFilterOptions={loadFilterOptions}
@@ -460,6 +480,7 @@ function ForecastInputTableComponent({
             forecastMode={forecastMode}
             planningView={planningView}
             formulaMap={formulaMap}
+            spreadMap={spreadMap}
             naphthaprices={naphthaprices}
             benzeneprices={benzeneprices}
             fixedPriceMap={fixedPriceMap}
@@ -468,10 +489,19 @@ function ForecastInputTableComponent({
             carryDetailVisibility={carryDetailVisibility}
             forecastSummary={forecastSummary}
             isForecastSummaryUpdating={isForecastSummaryUpdating}
+            isScopeDataLoading={isScopeDataLoading}
             forecastAuditVersion={forecastAuditVersion}
           />
         }
       />
+      {forecastLoadProgress?.active && (
+        <div className="pointer-events-none absolute right-3 top-2 z-40 rounded border border-blue-200 bg-white/95 px-2.5 py-1 text-[10px] font-semibold text-blue-700 shadow-sm">
+          <span className="inline-flex items-center gap-1.5">
+            <LoaderCircle size={12} className="animate-spin" />
+            Loading {forecastLoadProgress.version}… {forecastLoadProgress.completedChunks}/{forecastLoadProgress.totalChunks}
+          </span>
+        </div>
+      )}
       {showScrollLoader && (isTableDataLoading || isLoadingMore || hasMoreRows) && (
         <div className="pointer-events-none absolute bottom-14 left-1/2 z-30 -translate-x-1/2">
           <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white/95 px-3 py-2 text-[11px] font-semibold text-slate-600 shadow-md">

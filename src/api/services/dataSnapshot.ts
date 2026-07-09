@@ -265,6 +265,10 @@ async function performRefresh() {
     ]);
     clearActualCaches();
     clearForecastSummaryCache();
+    const { syncCplActualPrices } = await import('./cplActualSync');
+    syncCplActualPrices().catch(syncError => {
+      console.error('[cplActual] sync after snapshot refresh failed:', syncError);
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await prisma.dataSnapshotState.update({

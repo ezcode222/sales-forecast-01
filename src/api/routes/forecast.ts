@@ -18,6 +18,7 @@ import {
   monthKeyToEndOfMonth,
   monthKeyToFirstOfMonth,
   parseForecastPeriodToDate,
+  resolveForecastListGranularity,
 } from '../../lib/forecastPeriod';
 import { queueForecastChangeNotification } from '../services/forecastChangeNotification';
 import { sendForecastChangeEmails } from '../services/overplanNotification';
@@ -829,10 +830,56 @@ router.get('/audit', async (req, res) => {
   }
 });
 
+type ForecastListQueryParams = {
+  version?: string;
+  startPeriod?: string;
+  endPeriod?: string;
+  granularity?: string;
+  registrationIds?: string[];
+};
+
+async function queryForecastValues(params: ForecastListQueryParams) {
+  const { version, startPeriod, endPeriod, granularity } = params;
+  const registrationIds = params.registrationIds ?? [];
+  const requestedGranularity = granularity === 'week' ? 'week' : granularity === 'month' ? 'month' : undefined;
+  const effectiveGranularity = version
+    ? resolveForecastListGranularity(
+        version,
+        requestedGranularity === 'week' ? 'week' : 'month',
+      )
+    : requestedGranularity;
+
+  const rows = await prisma.forecastValue.findMany({
+    where: {
+      ...(registrationIds.length > 0 ? { registrationId: { in: registrationIds } } : {}),
+      ...(version ? { versionName: version } : {}),
+      ...(effectiveGranularity ? { granularity: effectiveGranularity } : {}),
+      ...(startPeriod || endPeriod ? {
+        period: {
+          ...(startPeriod ? { gte: monthKeyToFirstOfMonth(startPeriod) } : {}),
+          ...(endPeriod ? { lte: monthKeyToEndOfMonth(endPeriod) } : {}),
+        },
+      } : {}),
+    },
+    orderBy: [{ registrationId: 'asc' }, { period: 'asc' }],
+  });
+
+  return rows.map((r) => ({
+    registrationId: r.registrationId,
+    period: formatForecastPeriodForApi(r.period, r.granularity),
+    granularity: r.granularity,
+    version: r.versionName,
+    qtyFcst: Number(r.qtyFcst),
+    priceFcst: Number(r.priceFcst),
+    amountFcst: Number(r.amountFcst),
+  }));
+}
+
 /**
  * GET /api/forecast?version=&startPeriod=&endPeriod=&granularity=
  * Returns ForecastValue rows for given filters.
  * period field is "YYYY-MM" (month) or "YYYY-MM-DD" (week) in API responses.
+ * Prefer POST /query when filtering by many registrationIds (avoids HTTP 431).
  */
 router.get('/', async (req, res) => {
   const { version, startPeriod, endPeriod, granularity } = req.query as Record<string, string>;
@@ -842,32 +889,56 @@ router.get('/', async (req, res) => {
       ? [String(req.query.registrationId)]
       : [];
   try {
-    const rows = await prisma.forecastValue.findMany({
-      where: {
-        ...(registrationIds.length > 0 ? { registrationId: { in: registrationIds } } : {}),
-        ...(version     ? { versionName: version }                        : {}),
-        ...(granularity ? { granularity }                                  : {}),
-        ...(startPeriod || endPeriod ? {
-          period: {
-            ...(startPeriod ? { gte: monthKeyToFirstOfMonth(startPeriod) } : {}),
-            ...(endPeriod   ? { lte: monthKeyToEndOfMonth(endPeriod) }   : {}),
-          },
-        } : {}),
-      },
-      orderBy: [{ registrationId: 'asc' }, { period: 'asc' }],
-    });
-
-    res.json(rows.map((r) => ({
-      registrationId: r.registrationId,
-      period:         formatForecastPeriodForApi(r.period, r.granularity),
-      granularity:    r.granularity,
-      version:        r.versionName,
-      qtyFcst:        Number(r.qtyFcst),
-      priceFcst:      Number(r.priceFcst),
-      amountFcst:     Number(r.amountFcst),
-    })));
+    res.json(await queryForecastValues({
+      version,
+      startPeriod,
+      endPeriod,
+      granularity,
+      registrationIds,
+    }));
   } catch (error) {
     console.error('[forecast] GET error:', error);
+    res.status(500).json({ error: 'Failed to fetch forecast data' });
+  }
+});
+
+/**
+ * POST /api/forecast/query
+ * Body: { version, startPeriod, endPeriod, granularity, registrationIds }
+ * Same as GET but registrationIds in JSON body — avoids URL/header size limits (HTTP 431).
+ */
+router.post('/query', async (req, res) => {
+  const {
+    version,
+    startPeriod,
+    endPeriod,
+    granularity,
+    registrationIds: rawRegistrationIds,
+  } = req.body as {
+    version?: string;
+    startPeriod?: string;
+    endPeriod?: string;
+    granularity?: string;
+    registrationIds?: unknown;
+  };
+  const registrationIds = Array.isArray(rawRegistrationIds)
+    ? [...new Set(rawRegistrationIds.map(String).filter(Boolean))].slice(0, 5000)
+    : [];
+
+  if (registrationIds.length === 0) {
+    return res.json([]);
+  }
+
+  try {
+    res.json(await queryForecastValues({
+      version,
+      startPeriod,
+      endPeriod,
+      granularity,
+      registrationIds,
+    }));
+  } catch (error) {
+    console.error('[forecast] POST query error:', error);
     res.status(500).json({ error: 'Failed to fetch forecast data' });
   }
 });
@@ -958,36 +1029,55 @@ router.patch('/', async (req, res) => {
         },
       });
 
-      for (const update of normalizedUpdates) {
-        const key = `${update.registrationId}|${update.versionName}|${update.periodKey}`;
-        const changed = changedKeys.has(key);
-        await transaction.forecastValue.upsert({
-          where: {
-            registrationId_versionName_period: {
-              registrationId: update.registrationId,
-              versionName: update.versionName,
-              period: update.period,
-            },
-          },
-          update: {
-            granularity: update.granularity,
-            qtyFcst: update.qtyFcst,
-            priceFcst: update.priceFcst,
-            amountFcst: update.amountFcst,
-            ...(changed ? { lastBatchId: batch.id } : {}),
-          },
-          create: {
-            registrationId: update.registrationId,
-            versionName: update.versionName,
-            period: update.period,
-            granularity: update.granularity,
-            qtyFcst: update.qtyFcst,
-            priceFcst: update.priceFcst,
-            amountFcst: update.amountFcst,
-            lastBatchId: batch.id,
-          },
-        });
-      }
+      // Bulk upsert via a single MERGE instead of one round-trip per row. Only
+      // rows whose values changed pick up the new batch id (matching the previous
+      // per-row behaviour); unchanged rows keep their existing lastBatchId.
+      const mergePayload = normalizedUpdates.map(update => ({
+        registrationId: update.registrationId,
+        versionName: update.versionName,
+        period: update.period.toISOString().slice(0, 10),
+        granularity: update.granularity,
+        qtyFcst: update.qtyFcst,
+        priceFcst: update.priceFcst,
+        amountFcst: update.amountFcst,
+        changed: changedKeys.has(
+          `${update.registrationId}|${update.versionName}|${update.periodKey}`
+        ) ? 1 : 0,
+      }));
+      const mergeJson = JSON.stringify(mergePayload);
+      await transaction.$executeRaw`
+        MERGE [dbo].[forecast_values] AS target
+        USING (
+          SELECT
+            [registrationId], [versionName], [period], [granularity],
+            [qtyFcst], [priceFcst], [amountFcst], [changed]
+          FROM OPENJSON(${mergeJson})
+          WITH (
+            [registrationId] NVARCHAR(200) N'$.registrationId',
+            [versionName]    NVARCHAR(100) N'$.versionName',
+            [period]         DATE          N'$.period',
+            [granularity]    NVARCHAR(10)  N'$.granularity',
+            [qtyFcst]        DECIMAL(18,4) N'$.qtyFcst',
+            [priceFcst]      DECIMAL(18,4) N'$.priceFcst',
+            [amountFcst]     DECIMAL(18,4) N'$.amountFcst',
+            [changed]        BIT           N'$.changed'
+          )
+        ) AS source
+        ON target.[registrationId] = source.[registrationId]
+          AND target.[versionName] = source.[versionName]
+          AND target.[period] = source.[period]
+        WHEN MATCHED THEN
+          UPDATE SET
+            target.[granularity] = source.[granularity],
+            target.[qtyFcst] = source.[qtyFcst],
+            target.[priceFcst] = source.[priceFcst],
+            target.[amountFcst] = source.[amountFcst],
+            target.[lastBatchId] = CASE WHEN source.[changed] = 1 THEN ${batch.id} ELSE target.[lastBatchId] END,
+            target.[updatedAt] = SYSUTCDATETIME()
+        WHEN NOT MATCHED THEN
+          INSERT ([registrationId], [versionName], [period], [granularity], [qtyFcst], [priceFcst], [amountFcst], [lastBatchId], [updatedAt])
+          VALUES (source.[registrationId], source.[versionName], source.[period], source.[granularity], source.[qtyFcst], source.[priceFcst], source.[amountFcst], ${batch.id}, SYSUTCDATETIME());
+      `;
 
       if (changedUpdates.length > 0) {
         await transaction.forecastChangeLog.createMany({

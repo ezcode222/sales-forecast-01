@@ -54,6 +54,19 @@ export function firstWednesdayPeriod(month: string): string {
     .slice(0, 10);
 }
 
+/** Granularity used when loading forecast_values rows from the API. */
+export function resolveForecastListGranularity(
+  versionName: string,
+  forecastMode: 'month' | 'week' | 'day',
+): 'month' | 'week' {
+  // Current Forecast imports store first-Wednesday rows with granularity 'week'
+  // even when the grid is in month view.
+  if (versionName === CURRENT_FORECAST_VERSION_NAME) {
+    return 'week';
+  }
+  return forecastMode === 'week' ? 'week' : 'month';
+}
+
 export function resolveForecastStoragePeriod(
   displayPeriod: string,
   forecastMode: 'month' | 'week' | 'day',

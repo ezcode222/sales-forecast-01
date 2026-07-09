@@ -127,6 +127,11 @@ const scopedActualCache = new Map<
   { expiresAt: number; promise: Promise<ActualApiRow[]> }
 >();
 
+async function snapshotCachePrefix() {
+  const snapshotVersion = await getActiveSnapshotVersion();
+  return snapshotVersion ?? 'live';
+}
+
 export function clearActualCaches() {
   actualRangeCache.clear();
   scopedActualCache.clear();
@@ -302,7 +307,7 @@ async function queryActualRange(
         SUM(qtyAct) AS qtyAct,
         CASE
           WHEN SUM(qtyAct) = 0 THEN 0
-          ELSE SUM(qtyAct * priceAct) / NULLIF(SUM(qtyAct), 0)
+          ELSE SUM(amountAct) / NULLIF(SUM(qtyAct), 0)
         END AS priceAct,
         SUM(amountAct) AS amountAct,
         SUM(carryInETD) AS carryInETD,
@@ -440,7 +445,7 @@ async function queryScopedActualRange(
       SUM(qtyAct) AS qtyAct,
       CASE
         WHEN SUM(qtyAct) = 0 THEN 0
-        ELSE SUM(qtyAct * priceAct) / NULLIF(SUM(qtyAct), 0)
+        ELSE SUM(amountAct) / NULLIF(SUM(qtyAct), 0)
       END AS priceAct,
       SUM(amountAct) AS amountAct,
       SUM(carryInETD) AS carryInETD,
@@ -466,12 +471,13 @@ async function queryScopedActualRange(
   }));
 }
 
-function getCachedActualRange(
+async function getCachedActualRange(
   startMonth?: string,
   endMonth?: string,
   granularity: ActualGranularity = 'month'
 ) {
-  const cacheKey = `${granularity}|${startMonth ?? '*'}|${endMonth ?? '*'}`;
+  const snapshotPrefix = await snapshotCachePrefix();
+  const cacheKey = `${snapshotPrefix}|${granularity}|${startMonth ?? '*'}|${endMonth ?? '*'}`;
   const cached = actualRangeCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.promise;
 
@@ -483,14 +489,15 @@ function getCachedActualRange(
   return promise;
 }
 
-export function getCachedScopedActualRange(
+export async function getCachedScopedActualRange(
   startMonth: string | undefined,
   endMonth: string | undefined,
   registrationIds: string[],
   granularity: ActualGranularity = 'month'
 ) {
+  const snapshotPrefix = await snapshotCachePrefix();
   const sortedIds = [...new Set(registrationIds)].sort((left, right) => left.localeCompare(right));
-  const cacheKey = `${granularity}|${startMonth ?? '*'}|${endMonth ?? '*'}|${sortedIds.join('\u001f')}`;
+  const cacheKey = `${snapshotPrefix}|${granularity}|${startMonth ?? '*'}|${endMonth ?? '*'}|${sortedIds.join('\u001f')}`;
   const cached = scopedActualCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.promise;
 
@@ -509,7 +516,7 @@ export async function getCachedScopedActualRangeBatched(
   granularity: ActualGranularity = 'month'
 ) {
   if (await getActiveSnapshotVersion()) {
-    return getCachedScopedActualRange(startMonth, endMonth, registrationIds, granularity);
+    return await getCachedScopedActualRange(startMonth, endMonth, registrationIds, granularity);
   }
   const chunks: string[][] = [];
   for (let index = 0; index < registrationIds.length; index += 500) {

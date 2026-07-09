@@ -1,144 +1,53 @@
-// Repair master_data_crm_registrations codes/names from Excel keys.
-// Dry run: node --env-file=.env scripts/repair-managed-registrations.mjs
-// Apply:    node --env-file=.env scripts/repair-managed-registrations.mjs --apply
+// Repair ALL excel-import registrations (codes + names from customer master).
+// Dry run: npx tsx --env-file=.env scripts/repair-managed-registrations.mjs
+// Apply:    npx tsx --env-file=.env scripts/repair-managed-registrations.mjs --apply
+// Names only: npx tsx --env-file=.env scripts/repair-managed-registrations.mjs --names-only [--apply]
 import {
-  buildRepairManagedRegistrationData,
-  isLikelyPlantCode,
-  isLikelyRegistrationCode,
-} from '../src/api/services/forecastImport/autoCreateRegistrations.ts';
+  auditExcelImportNameMismatches,
+  repairAllExcelImportRegistrations,
+  repairExcelImportCustomerNamesOnly,
+} from '../src/api/services/repairImportRegistrations.ts';
+import { ensureCustomerMasterCache } from '../src/api/services/customerMaster.ts';
 import prisma from '../src/db/prisma.ts';
 
 const apply = process.argv.includes('--apply');
-
-function rowChanged(before, after) {
-  const fields = [
-    'newKey',
-    'keyForNoCRM',
-    'registrationTopic',
-    'soldToCode',
-    'shipToCode',
-    'endUserCode',
-    'plantCode',
-    'materialCode',
-    'onOffSpec',
-    'ownerName',
-    'soldToName',
-    'shipToName',
-    'endUser',
-    'plantName',
-    'countryName',
-    'businessUnit',
-  ];
-  return fields.some(field => (before[field] ?? null) !== (after[field] ?? null));
-}
+const namesOnly = process.argv.includes('--names-only');
 
 async function main() {
-  const rows = await prisma.masterDataCrmRegistration.findMany({
-    where: { mainRegist: 1 },
-    select: {
-      id: true,
-      newKey: true,
-      keyForNoCRM: true,
-      registrationTopic: true,
-      soldToCode: true,
-      shipToCode: true,
-      endUserCode: true,
-      plantCode: true,
-      materialCode: true,
-      onOffSpec: true,
-      ownerName: true,
-      materialDescription: true,
-      countryName: true,
-      shipToName: true,
-      soldToName: true,
-      endUser: true,
-      plantName: true,
-      process: true,
-      application: true,
-      subApp: true,
-      priceFormula: true,
-    },
-  });
-
-  let changed = 0;
-  let unchanged = 0;
-  let invalidAfterRepair = 0;
-  const samples = [];
-
-  for (const row of rows) {
-    const repaired = buildRepairManagedRegistrationData({
-      ...row,
-      hasImportedPrice: row.priceFormula === 'Fixed Price',
-    });
-    const updateData = {
-      newKey: repaired.newKey,
-      keyForNoCRM: repaired.keyForNoCRM,
-      registrationTopic: repaired.registrationTopic,
-      soldToCode: repaired.soldToCode,
-      shipToCode: repaired.shipToCode,
-      endUserCode: repaired.endUserCode,
-      plantCode: repaired.plantCode,
-      materialCode: repaired.materialCode,
-      onOffSpec: repaired.onOffSpec,
-      ownerName: repaired.ownerName,
-      soldToName: repaired.soldToName,
-      shipToName: repaired.shipToName,
-      endUser: repaired.endUser,
-      plantName: repaired.plantName,
-      countryName: repaired.countryName,
-      businessUnit: repaired.businessUnit,
-    };
-
-    if (!rowChanged(row, updateData)) {
-      unchanged += 1;
-      continue;
-    }
-
-    const stillBad =
-      !isLikelyPlantCode(updateData.plantCode) && updateData.plantCode !== '0'
-      || (!isLikelyRegistrationCode(updateData.soldToCode) && updateData.soldToCode !== '0');
-    if (stillBad) invalidAfterRepair += 1;
-
-    changed += 1;
-    if (samples.length < 5) {
-      samples.push({
-        id: row.id,
-        before: {
-          ownerName: row.ownerName,
-          soldToCode: row.soldToCode,
-          plantCode: row.plantCode,
-          soldToName: row.soldToName,
-          plantName: row.plantName,
-          countryName: row.countryName,
-        },
-        after: {
-          ownerName: updateData.ownerName,
-          soldToCode: updateData.soldToCode,
-          plantCode: updateData.plantCode,
-          soldToName: updateData.soldToName,
-          plantName: updateData.plantName,
-          countryName: updateData.countryName,
-          registrationTopic: updateData.registrationTopic,
-        },
-      });
-    }
-
-    if (apply) {
-      await prisma.masterDataCrmRegistration.update({
-        where: { id: row.id },
-        data: updateData,
-      });
-    }
+  const cache = await ensureCustomerMasterCache();
+  if (!cache?.ok) {
+    console.error('Customer master cache is empty. Sync first.');
+    process.exit(1);
   }
 
-  console.log(`Mode: ${apply ? 'APPLY' : 'DRY RUN'}`);
-  console.log(`Total managed rows: ${rows.length}`);
-  console.log(`Rows to update: ${changed}`);
-  console.log(`Unchanged: ${unchanged}`);
-  console.log(`Still suspicious after repair: ${invalidAfterRepair}`);
-  console.log('Sample changes:', JSON.stringify(samples, null, 2));
+  const before = await auditExcelImportNameMismatches();
+  console.log('Before repair:');
+  console.log(`  excel-import rows: ${before.totalRows}`);
+  console.log(`  rows with name != master: ${before.rowsWithMismatch}`);
+  console.log(`  field mismatches: ${before.fieldMismatches}`);
+  if (before.samples.length > 0) {
+    console.log('  samples:', JSON.stringify(before.samples, null, 2));
+  }
 
-  if (!apply && changed > 0) {
+  const stats = namesOnly
+    ? await repairExcelImportCustomerNamesOnly(apply)
+    : await repairAllExcelImportRegistrations(apply);
+
+  console.log(`\nMode: ${apply ? 'APPLY' : 'DRY RUN'} (${namesOnly ? 'names-only' : 'full repair'})`);
+  console.log(`Total excel-import rows: ${stats.totalRows}`);
+  console.log(`Rows to update: ${stats.rowsUpdated}`);
+  console.log(`Unchanged: ${stats.rowsUnchanged}`);
+  console.log(`Customer name fields fixed: ${stats.nameFieldsFixed}`);
+  if (!namesOnly) {
+    console.log(`Still suspicious after repair: ${stats.stillSuspicious}`);
+  }
+
+  if (apply) {
+    const after = await auditExcelImportNameMismatches();
+    console.log('\nAfter repair:');
+    console.log(`  rows with name != master: ${after.rowsWithMismatch}`);
+    console.log(`  field mismatches: ${after.fieldMismatches}`);
+  } else if (stats.rowsUpdated > 0) {
     console.log('\nRe-run with --apply to persist fixes.');
   }
 }

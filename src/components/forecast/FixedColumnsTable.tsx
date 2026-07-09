@@ -42,6 +42,9 @@ interface FixedColumnsTableProps {
   selectedDimension: Dimension;
   formulaMap: Map<string, PriceFormula>;
   onFormulaChange: (regId: string, formula: PriceFormula) => void;
+  spreadMap: Map<string, number>;
+  onSpreadChange: (regId: string, spread: number) => void;
+  onSpreadCommit: (regId: string, spread: number) => void;
   formulaFilter: ColumnFilterValue;
   onFormulaFilterChange: (v: ColumnFilterValue) => void;
   loadFilterOptions: (
@@ -71,6 +74,9 @@ export function FixedColumnsTable({
   selectedDimension,
   formulaMap,
   onFormulaChange,
+  spreadMap,
+  onSpreadChange,
+  onSpreadCommit,
   formulaFilter,
   onFormulaFilterChange,
   loadFilterOptions,
@@ -89,8 +95,10 @@ export function FixedColumnsTable({
 
   const ROW_HEIGHT = FORECAST_TABLE_METRICS.bodyRowHeight;
   const OVERSCAN = 2;
-  const visibleStart = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
-  const visibleEnd = Math.min(registrations.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
+  const maxScrollTop = Math.max(0, registrations.length * ROW_HEIGHT - viewportHeight);
+  const clampedScrollTop = Math.min(scrollTop, maxScrollTop);
+  const visibleStart = Math.max(0, Math.floor(clampedScrollTop / ROW_HEIGHT) - OVERSCAN);
+  const visibleEnd = Math.min(registrations.length, Math.ceil((clampedScrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
   const visibleRegistrations = registrations.slice(visibleStart, visibleEnd);
   const topSpacerHeight = visibleStart * ROW_HEIGHT;
   const bottomSpacerHeight = Math.max(0, (registrations.length - visibleEnd) * ROW_HEIGHT);
@@ -129,7 +137,13 @@ export function FixedColumnsTable({
                     staticOptions={col.key === 'priceFormula' ? (PRICE_FORMULA_OPTIONS as unknown as string[]) : undefined}
                     overrideValue={col.key === 'priceFormula' ? formulaFilter : undefined}
                     overrideOnChange={col.key === 'priceFormula' ? onFormulaFilterChange : undefined}
-                    loadFilterOptions={col.key.startsWith('carry') || col.key.startsWith('inventory') ? undefined : loadFilterOptions}
+                    loadFilterOptions={
+                      col.key.startsWith('carry') ||
+                      col.key.startsWith('inventory') ||
+                      col.key === 'spread'
+                        ? undefined
+                        : loadFilterOptions
+                    }
                   />
                 </React.Fragment>
               ))}
@@ -162,6 +176,16 @@ export function FixedColumnsTable({
                         </select>
                       </div>
                     </td>
+                  ) : col.key === 'spread' ? (
+                    <React.Fragment key={col.key}>
+                      <SpreadCell
+                        regId={reg.id}
+                        width={col.width}
+                        value={spreadMap.get(reg.id) ?? reg.spread ?? 0}
+                        onSpreadChange={onSpreadChange}
+                        onSpreadCommit={onSpreadCommit}
+                      />
+                    </React.Fragment>
                   ) : (
                     <React.Fragment key={col.key}>
                       <RegTableCell reg={reg} columnKey={col.key} width={col.width} />
@@ -206,5 +230,64 @@ export function FixedColumnsTable({
         <div style={{ width: tableWidth, height: 1 }} />
       </div>
     </div>
+  );
+}
+
+function SpreadCell({
+  regId,
+  width,
+  value,
+  onSpreadChange,
+  onSpreadCommit,
+}: Readonly<{
+  regId: string;
+  width: number;
+  value: number;
+  onSpreadChange: (regId: string, spread: number) => void;
+  onSpreadCommit: (regId: string, spread: number) => void;
+}>) {
+  const [draft, setDraft] = React.useState(String(value));
+  const [isFocused, setIsFocused] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isFocused) setDraft(String(value));
+  }, [isFocused, value]);
+
+  const commit = () => {
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setDraft(String(value));
+      return;
+    }
+    onSpreadChange(regId, parsed);
+    onSpreadCommit(regId, parsed);
+  };
+
+  return (
+    <td
+      style={{ width, minWidth: width }}
+      className="p-0 border-r border-slate-100 bg-white align-middle overflow-hidden"
+    >
+      <div className={cn(forecastBodyCellClass, 'px-1.5')}>
+        <input
+          type="number"
+          min={0}
+          step="0.0001"
+          value={draft}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => {
+            setIsFocused(false);
+            commit();
+          }}
+          onKeyDown={event => {
+            if (event.key === 'Enter') {
+              event.currentTarget.blur();
+            }
+          }}
+          onChange={event => setDraft(event.target.value)}
+          className="w-full rounded border border-slate-200 px-1 py-0.5 text-right font-mono text-[10px] outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+        />
+      </div>
+    </td>
   );
 }

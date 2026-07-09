@@ -99,6 +99,16 @@ model PriceManagementValue {
   @@map("price_management_values")
 }
 
+/// Per-registration spread override for CRM registration IDs (and optional override layer).
+model RegistrationPriceSetting {
+  registrationId String   @id @db.NVarChar(200)
+  spread         Decimal  @default(0) @db.Decimal(18, 4)
+  updatedAt      DateTime @default(now()) @updatedAt
+  updatedBy      String?  @db.NVarChar(200)
+
+  @@map("registration_price_settings")
+}
+
 /// Registrations created inside Sales Forecast. CRM remains read-only.
 model MasterDataCrmRegistration {
   id                          String   @id @default(uuid()) @db.NVarChar(36)
@@ -213,6 +223,16 @@ model HrEmployeeCache {
   @@index([fullNameEng])
   @@index([costCenterEng])
   @@map("hr_employee_cache")
+}
+
+/// Local snapshot of SAP VW_Customer_master for sold-to / ship-to / end-user name lookup.
+model CustomerMasterCache {
+  custCode      String   @id @db.NVarChar(50)
+  customerName  String   @default("") @db.NVarChar(500)
+  syncedAt      DateTime @default(now()) @updatedAt
+
+  @@index([customerName])
+  @@map("customer_master_cache")
 }
 
 /// Global CC list (not bound to owner) for forecast change emails.

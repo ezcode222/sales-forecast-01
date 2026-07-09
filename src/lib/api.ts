@@ -5,10 +5,47 @@ import type {
   ForecastSummaryRequest,
   ForecastValue,
   InventoryRow,
+  ManagedRegistrationUpdateResponse,
   PriceManagementRow,
   PriceManagementType,
   Registration,
 } from '../types/forecast';
+import { withRegistrationIncompleteFlag } from './registrationIncomplete';
+
+export const REGISTRATION_PAGE_SIZE = 80;
+export const FORECAST_LIST_REGISTRATION_CHUNK_SIZE = 500;
+export const FORECAST_PRIORITY_REGISTRATION_COUNT = 120;
+export const FORECAST_BACKGROUND_CHUNK_SIZE = 200;
+export const FORECAST_LIST_CONCURRENCY = 4;
+
+export interface ForecastListParams {
+  version?: string;
+  startPeriod?: string;
+  endPeriod?: string;
+  granularity?: 'month' | 'week';
+  registrationIds?: string[];
+  signal?: AbortSignal;
+}
+
+export interface ForecastListChunkMeta {
+  chunkIndex: number;
+  totalChunks: number;
+}
+
+export interface ForecastListProgressiveOptions {
+  onChunk: (rows: ForecastValue[], meta: ForecastListChunkMeta) => void | Promise<void>;
+  signal?: AbortSignal;
+  concurrency?: number;
+}
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  if (items.length <= chunkSize) return [items];
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
 
 export interface CurrentForecastImportRecord {
   sourceRow: number;
@@ -382,6 +419,9 @@ export function formatApiError(error: unknown, fallback: string): string {
   if (error.status === 404) {
     return 'API endpoint not found — restart API server (npm run server) or deploy the latest backend.';
   }
+  if (error.status === 431) {
+    return 'Request too large (HTTP 431) — refresh the page. If this persists, restart the API server.';
+  }
   return error.message || fallback;
 }
 
@@ -490,6 +530,84 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+type ForecastListApiRow = {
+  registrationId: string;
+  period: string;
+  version: string;
+  qtyFcst: number;
+  priceFcst: number;
+  amountFcst: number;
+};
+
+function mapForecastListRows(rows: ForecastListApiRow[]): ForecastValue[] {
+  return rows.map(r => ({
+    registrationId: r.registrationId,
+    month: r.period,
+    version: r.version,
+    qtyAct: 0,
+    qtyFcst: r.qtyFcst,
+    priceFcst: r.priceFcst,
+    amountFcst: r.amountFcst,
+    priceAct: 0,
+  }));
+}
+
+async function runForecastListProgressive(
+  params: ForecastListParams,
+  options: ForecastListProgressiveOptions,
+): Promise<{ totalChunks: number }> {
+  const signal = options.signal ?? params.signal;
+  const fetchChunk = async (registrationIds?: string[]) => {
+    if (registrationIds && registrationIds.length > 0) {
+      return request<ForecastListApiRow[]>('/api/forecast/query', {
+        method: 'POST',
+        body: JSON.stringify({
+          version: params.version,
+          startPeriod: params.startPeriod,
+          endPeriod: params.endPeriod,
+          granularity: params.granularity,
+          registrationIds,
+        }),
+        signal,
+      });
+    }
+    const qs = new URLSearchParams();
+    if (params.version) qs.set('version', params.version);
+    if (params.startPeriod) qs.set('startPeriod', params.startPeriod);
+    if (params.endPeriod) qs.set('endPeriod', params.endPeriod);
+    if (params.granularity) qs.set('granularity', params.granularity);
+    return request<ForecastListApiRow[]>(
+      `/api/forecast?${qs.toString()}`,
+      { signal }
+    );
+  };
+
+  const registrationIds = params.registrationIds ?? [];
+  const idChunks = registrationIds.length > 0
+    ? chunkArray(registrationIds, FORECAST_LIST_REGISTRATION_CHUNK_SIZE)
+    : [undefined as string[] | undefined];
+  const totalChunks = idChunks.length;
+  const concurrency = Math.max(1, options.concurrency ?? FORECAST_LIST_CONCURRENCY);
+
+  const firstRows = await fetchChunk(idChunks[0]);
+  if (signal?.aborted) return { totalChunks };
+  await options.onChunk(mapForecastListRows(firstRows), { chunkIndex: 0, totalChunks });
+
+  for (let offset = 1; offset < idChunks.length; offset += concurrency) {
+    const batch = idChunks.slice(offset, offset + concurrency);
+    const results = await Promise.all(batch.map(ids => fetchChunk(ids)));
+    if (signal?.aborted) return { totalChunks };
+    for (let index = 0; index < results.length; index += 1) {
+      await options.onChunk(
+        mapForecastListRows(results[index]),
+        { chunkIndex: offset + index, totalChunks },
+      );
+    }
+  }
+
+  return { totalChunks };
+}
+
 // ── Registrations ────────────────────────────────────────────────────────────
 
 export const api = {
@@ -527,17 +645,33 @@ export const api = {
   },
 
   registrations: {
-    list: (): Promise<Registration[]> => request('/api/registrations'),
-    managed: (): Promise<Registration[]> => request('/api/registrations/managed'),
+    list: (
+      filters: Record<string, string[]> = {},
+      signal?: AbortSignal
+    ): Promise<Registration[]> => {
+      const qs = new URLSearchParams();
+      if (Object.keys(filters).length > 0) qs.set('filters', JSON.stringify(filters));
+      const query = qs.toString();
+      return request(`/api/registrations${query ? `?${query}` : ''}`, { signal });
+    },
+    managed: async (): Promise<Registration[]> => {
+      const rows = await request<Registration[]>('/api/registrations/managed');
+      return rows.map(withRegistrationIncompleteFlag);
+    },
     create: (registration: Registration): Promise<Registration> =>
       request('/api/registrations', {
         method: 'POST',
         body: JSON.stringify(registration),
       }),
-    update: (registration: Registration): Promise<Registration> =>
+    update: (registration: Registration): Promise<ManagedRegistrationUpdateResponse> =>
       request(`/api/registrations/${encodeURIComponent(registration.id)}`, {
         method: 'PATCH',
         body: JSON.stringify(registration),
+      }),
+    updateSpread: (registrationId: string, spread: number, updatedBy?: string): Promise<{ registrationId: string; spread: number }> =>
+      request(`/api/registrations/${encodeURIComponent(registrationId)}/spread`, {
+        method: 'PATCH',
+        body: JSON.stringify({ spread, updatedBy }),
       }),
     remove: (registrationId: string): Promise<{ ok: boolean }> =>
       request(`/api/registrations/${encodeURIComponent(registrationId)}`, {
@@ -571,34 +705,35 @@ export const api = {
 
   // ── Forecast values ──────────────────────────────────────────────────────
   forecast: {
-    list: (params: {
-      version?: string;
-      startPeriod?: string;
-      endPeriod?: string;
-      granularity?: 'month' | 'week';
-      registrationIds?: string[];
-      signal?: AbortSignal;
-    } = {}): Promise<ForecastValue[]> => {
-      const qs = new URLSearchParams();
-      if (params.version)     qs.set('version',     params.version);
-      if (params.startPeriod) qs.set('startPeriod', params.startPeriod);
-      if (params.endPeriod)   qs.set('endPeriod',   params.endPeriod);
-      if (params.granularity) qs.set('granularity', params.granularity);
-      params.registrationIds?.forEach(id => qs.append('registrationId', id));
-      return request<{ registrationId: string; period: string; version: string; qtyFcst: number; priceFcst: number; amountFcst: number }[]>(
-        `/api/forecast?${qs.toString()}`,
-        { signal: params.signal }
-      ).then(rows => rows.map(r => ({
-        registrationId: r.registrationId,
-        month:          r.period,     // server uses 'period'; frontend uses 'month'
-        version:        r.version,
-        qtyAct:         0,            // filled in from actuals merge
-        qtyFcst:        r.qtyFcst,
-        priceFcst:      r.priceFcst,
-        amountFcst:     r.amountFcst,
-        priceAct:       0,            // filled in from actuals merge
-      })));
+    query: async (params: ForecastListParams = {}): Promise<ForecastValue[]> => {
+      const registrationIds = params.registrationIds ?? [];
+      if (registrationIds.length === 0) return [];
+      const rows = await request<ForecastListApiRow[]>('/api/forecast/query', {
+        method: 'POST',
+        body: JSON.stringify({
+          version: params.version,
+          startPeriod: params.startPeriod,
+          endPeriod: params.endPeriod,
+          granularity: params.granularity,
+          registrationIds,
+        }),
+        signal: params.signal,
+      });
+      return mapForecastListRows(rows);
     },
+
+    list: async (params: ForecastListParams = {}): Promise<ForecastValue[]> => {
+      const collected: ForecastValue[] = [];
+      await runForecastListProgressive(params, {
+        signal: params.signal,
+        onChunk: rows => {
+          collected.push(...rows);
+        },
+      });
+      return collected;
+    },
+
+    listProgressive: runForecastListProgressive,
 
     save: (
       values: ForecastValue[],

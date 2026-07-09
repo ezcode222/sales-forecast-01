@@ -14,6 +14,72 @@ export const monthKey = (value: string) => {
   return value;
 };
 
+/// Builds a lookup Map so getForecastCellValue can resolve cells in O(1) instead
+/// of scanning the whole forecastData array per cell. Shared by the grid and the
+/// Excel export.
+export function buildForecastIndex(forecastData: ForecastValue[]) {
+  const index = new Map<string, ForecastValue>();
+  const addAggregate = (key: string, item: ForecastValue) => {
+    const current = index.get(key);
+    index.set(key, {
+      ...item,
+      qtyAct: (current?.qtyAct ?? 0) + (item.qtyAct ?? 0),
+      qtyFcst: (current?.qtyFcst ?? 0) + (item.qtyFcst ?? 0),
+      amountAct: (current?.amountAct ?? 0) + (item.amountAct ?? 0),
+    });
+  };
+
+  forecastData.forEach(item => {
+    index.set(`${item.registrationId}|${item.version}|${item.month}`, item);
+    const actualKey = `actual|${item.registrationId}|${item.month}`;
+    const currentActual = index.get(actualKey);
+    const hasActualData =
+      item.qtyAct !== 0 ||
+      (item.amountAct ?? 0) !== 0 ||
+      (item.carryInETD ?? 0) !== 0 ||
+      (item.carryOutETD ?? 0) !== 0 ||
+      (item.carryInLoading ?? 0) !== 0 ||
+      (item.carryOutLoading ?? 0) !== 0;
+    if (!currentActual || hasActualData) index.set(actualKey, item);
+
+    if (isDailyKey(item.month)) {
+      addAggregate(
+        `dailyMonth|${item.registrationId}|${item.version}|${item.month.slice(0, 7)}`,
+        item
+      );
+      const monthPeriod = item.month.slice(0, 7);
+      const monthMapKey = `${item.registrationId}|${item.version}|${monthPeriod}`;
+      const existingMonth = index.get(monthMapKey);
+      if (!existingMonth || (existingMonth.qtyFcst ?? 0) === 0) {
+        index.set(monthMapKey, item);
+      }
+    } else if (isWeekRangeKey(item.month)) {
+      const [start, end] = item.month.split('|');
+      const months = new Set<string>();
+      const cursor = new Date(`${start}T00:00:00Z`);
+      const endDate = new Date(`${end}T00:00:00Z`);
+      let guard = 0;
+      while (cursor <= endDate && guard < 366) {
+        months.add(cursor.toISOString().slice(0, 7));
+        // Map every day the week range covers back to this item so week-mode
+        // daily cells can resolve their containing range in O(1) instead of
+        // scanning the whole forecastData array per empty cell (issue #6).
+        index.set(
+          `weekCover|${item.registrationId}|${item.version}|${cursor.toISOString().slice(0, 10)}`,
+          item
+        );
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+        guard += 1;
+      }
+      months.forEach(month => addAggregate(
+        `weeklyMonth|${item.registrationId}|${item.version}|${month}`,
+        item
+      ));
+    }
+  });
+  return index;
+}
+
 export function resolveRegistrationPriceFormula(
   formulaMap: Map<string, PriceFormula>,
   registration: Registration
@@ -22,6 +88,15 @@ export function resolveRegistrationPriceFormula(
   if (mapped) return mapped;
   const fromRegistration = registration.priceFormula as PriceFormula;
   return PRICE_FORMULA_OPTIONS.includes(fromRegistration) ? fromRegistration : 'CPL';
+}
+
+export function resolveRegistrationSpread(
+  spreadMap: Map<string, number>,
+  registration: Registration,
+): number {
+  const mapped = spreadMap.get(registration.id);
+  if (mapped !== undefined) return mapped;
+  return Number(registration.spread ?? 0);
 }
 
 export function getForecastStoragePeriod(
@@ -57,7 +132,8 @@ export function getForecastCellValue(
     cpl: Map<string, number>;
     naphtha: Map<string, number>;
     benzene: Map<string, number>;
-  }
+  },
+  spreadMap?: Map<string, number>,
 ): { value: number; isEditable: boolean } {
   const directItem = forecastIndex
     ? forecastIndex.get(`${reg.id}|${selectedVersion}|${month}`)
@@ -72,11 +148,13 @@ export function getForecastCellValue(
             f => f.registrationId === reg.id && f.version === selectedVersion && f.month === monthKey(month)
           ))
     : forecastMode === 'week' && isDailyKey(month)
-      ? forecastData.find(f => {
-          if (f.registrationId !== reg.id || f.version !== selectedVersion || !isWeekRangeKey(f.month)) return false;
-          const [rangeStart, rangeEnd] = f.month.split('|');
-          return month >= rangeStart && month <= rangeEnd;
-        }) ?? (
+      ? (forecastIndex
+          ? forecastIndex.get(`weekCover|${reg.id}|${selectedVersion}|${month}`)
+          : forecastData.find(f => {
+              if (f.registrationId !== reg.id || f.version !== selectedVersion || !isWeekRangeKey(f.month)) return false;
+              const [rangeStart, rangeEnd] = f.month.split('|');
+              return month >= rangeStart && month <= rangeEnd;
+            })) ?? (
           month === firstWednesdayPeriod(monthKey(month))
             ? (forecastIndex
                 ? forecastIndex.get(`${reg.id}|${selectedVersion}|${monthKey(month)}`)
@@ -156,6 +234,10 @@ export function getForecastCellValue(
     (storedPriceFcst != null && storedPriceFcst > 0 ? storedPriceFcst : undefined) ??
     (activeItem?.priceFcst != null && activeItem.priceFcst > 0 ? activeItem.priceFcst : undefined);
 
+  const spread = spreadMap
+    ? resolveRegistrationSpread(spreadMap, reg)
+    : Number(reg.spread ?? 0);
+
   let priceFcst: number;
   const resolvedFormula = formula ?? 'CPL';
   if (storedFixedPrice != null) {
@@ -165,9 +247,9 @@ export function getForecastCellValue(
   } else if (resolvedFormula === 'Benzene') {
     priceFcst = benzene;
   } else if (resolvedFormula === 'Fixed Price') {
-    priceFcst = cpl + reg.spread;
+    priceFcst = cpl + spread;
   } else {
-    priceFcst = cpl + reg.spread;
+    priceFcst = cpl + spread;
   }
 
   const baseActValue = qtyAct ?? 0;

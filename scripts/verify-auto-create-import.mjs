@@ -7,6 +7,7 @@ import {
   EXCEL_IMPORT_CREATED_BY,
   resolveOrCreateImportRegistrations,
 } from '../src/api/services/forecastImport/autoCreateRegistrations.ts';
+import { normalizeCrmCategoryFields, isLikelyCompanyName } from '../src/api/services/registrationCategory.ts';
 import { buildVersionedImportPreview } from '../src/api/services/forecastImport/buildVersionedPreview.ts';
 import { confirmVersionedImport } from '../src/api/services/forecastImport/confirmImport.ts';
 import { getPreviewCache } from '../src/api/services/forecastImport/previewCache.ts';
@@ -84,8 +85,51 @@ function assert(condition, message) {
   });
   assert(validKeyData.soldToCode === '10976', 'valid key should use soldTo code from key not Excel name');
   assert(validKeyData.plantCode === '1104', 'valid key should use plant code from key not Excel country');
-  assert(validKeyData.soldToName === 'Sold Name', 'valid key should keep soldTo name separate');
+  assert(validKeyData.soldToName === null, 'valid key should not store Excel soldTo name at create');
   console.log('OK buildRegistrationCreateData separates codes and names');
+
+  const comboCats = normalizeCrmCategoryFields(
+    'INJ_Combination Switch',
+    'Combination Switch',
+    'TOYO DENSO',
+  );
+  assert(comboCats.process === 'Injection', 'INJ process should map to Injection Cat1');
+  assert(comboCats.application === 'INJ_Combination Switch', 'INJ code should move to Cat2/application');
+  assert(comboCats.subApp === 'TOYO DENSO', 'sub-app should stay in Cat3');
+  const doorCats = normalizeCrmCategoryFields('INJ_Door System', 'Cap lock header', null);
+  assert(doorCats.process === 'Injection' && doorCats.application === 'INJ_Door System', 'door system shift');
+  assert(doorCats.subApp === 'Cap lock header', 'application fallback to Cat3 when no sub-app');
+  const stableCats = normalizeCrmCategoryFields('Injection', 'MF', 'Fishing net');
+  assert(stableCats.process === 'Injection' && stableCats.application === 'MF' && stableCats.subApp === 'Fishing net', 'already aligned rows unchanged');
+  const comboImport = buildRegistrationCreateData({
+    excelKeyForNoRegist: '1/2/3/1104/400212/Off',
+    sourceSheet: 'Polymer',
+    sourceRow: 3,
+    soldToCode: '0',
+    shipToCode: '0',
+    endUserCode: '0',
+    plantCode: '1104',
+    materialCode: '400212',
+    onOffSpec: 'Off',
+    ownerName: 'IMPORT',
+    materialDescription: 'Test',
+    countryName: null,
+    shipToName: null,
+    soldToName: null,
+    endUser: null,
+    plantName: null,
+    process: 'INJ_Combination Switch',
+    application: 'Combination Switch',
+    subApp: 'TOYO DENSO',
+    hasImportedPrice: false,
+    pendingForecastRecords: [],
+  });
+  assert(comboImport.process === 'Injection' && comboImport.application === 'INJ_Combination Switch', 'import create data category normalize');
+  assert(comboImport.subApp === 'TOYO DENSO', 'import create data sub-app');
+  assert(isLikelyCompanyName('AMCOR FLEXIBLES (NEW ZEALAND) LIMITED'), 'company detect');
+  const noCompanySub = normalizeCrmCategoryFields('INJ_2W', 'AMCOR FLEXIBLES (NEW ZEALAND) LIMITED', null);
+  assert(noCompanySub.subApp === null, 'company name must not fall into Cat3');
+  console.log('OK normalizeCrmCategoryFields');
 
   const partialKeyData = buildRegistrationCreateData({
     excelKeyForNoRegist: '///1110/401098/On',

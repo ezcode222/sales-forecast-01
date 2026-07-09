@@ -62,6 +62,7 @@ export const REG_COLUMN_KEYS = [
   'productName',
   'column1',
   'priceFormula',
+  'spread',
 ] as const;
 
 export type RegColumnKey = (typeof REG_COLUMN_KEYS)[number];
@@ -70,6 +71,7 @@ export interface Registration {
   id: string;
   isDraft?: boolean;
   isManaged?: boolean;
+  isIncomplete?: boolean;
   sourceStatus?: 'matched' | 'registration_only' | 'actual_only';
   keyForNoCRM?: string;
   businessUnit: string;
@@ -131,6 +133,21 @@ export interface Registration {
   inventoryOgQty?: number;
   inventoryYoQty?: number;
   inventoryDate?: string | null;
+}
+
+export interface ManagedRegistrationMergeResult {
+  action: 'merged_to_crm';
+  crmRegistrationId: string;
+  forecastsMoved: number;
+  removedManagedId: string;
+}
+
+export type ManagedRegistrationUpdateResponse = Registration | ManagedRegistrationMergeResult;
+
+export function isManagedRegistrationMerge(
+  result: ManagedRegistrationUpdateResponse,
+): result is ManagedRegistrationMergeResult {
+  return 'action' in result && result.action === 'merged_to_crm';
 }
 
 export interface CPLPrice {
@@ -204,6 +221,13 @@ export interface ForecastSummaryRequest {
   formulaOverrides: Record<string, string>;
   carryFilters: Record<string, string[]>;
   registrationIds?: string[];
+}
+
+export interface ForecastLoadProgress {
+  active: boolean;
+  completedChunks: number;
+  totalChunks: number;
+  version: string;
 }
 
 export interface InventoryRow {

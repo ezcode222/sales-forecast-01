@@ -11,6 +11,7 @@ const cellStyles: Partial<Record<RegColumnKey, string>> = {
   materialCode: 'font-mono text-slate-500 uppercase',
   plantCode: 'font-mono font-bold text-blue-700',
   onOffSpec: 'font-bold text-slate-600',
+  spread: 'font-mono text-slate-700 justify-end',
   inventoryA0Qty: 'font-normal text-black justify-end',
   inventoryNonA0Qty: 'font-normal text-black justify-end',
   inventoryWaitJudgeQty: 'font-normal text-black justify-end',

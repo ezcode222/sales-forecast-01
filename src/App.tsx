@@ -46,9 +46,10 @@ import {
   NotificationEmailPreviewModal,
   type EmailBatchPreview,
 } from './components/notifications/NotificationEmailPreviewModal';
-import { getForecastCellValue, getForecastStoragePeriod, monthKey } from './components/forecast/forecastCellUtils';
+import { buildForecastIndex, getForecastCellValue, getForecastStoragePeriod, monthKey, resolveRegistrationPriceFormula } from './components/forecast/forecastCellUtils';
+import { resolveForecastListGranularity } from './lib/forecastPeriod';
 import { filterRegistrations } from './components/forecast/forecastFilterUtils';
-import { api, ApiError, formatApiError, type AuthUser, type SessionPermissions, type SnapshotStatus } from './lib/api';
+import { api, ApiError, FORECAST_BACKGROUND_CHUNK_SIZE, FORECAST_PRIORITY_REGISTRATION_COUNT, REGISTRATION_PAGE_SIZE, formatApiError, type AuthUser, type SessionPermissions, type SnapshotStatus } from './lib/api';
 import { effectivePermissions } from './lib/permissions';
 import {
   EMPTY_COLUMN_FILTER,
@@ -57,6 +58,7 @@ import {
   type ActualValue,
   type CPLPrice,
   type Dimension,
+  type ForecastLoadProgress,
   type ForecastSummary,
   type ForecastSummaryRequest,
   type ForecastValue,
@@ -66,6 +68,7 @@ import {
   type PriceFormula,
   type Registration,
   type ValueType,
+  isManagedRegistrationMerge,
 } from './types/forecast';
 
 const lazyRechart = (name: string) => lazy(async () => {
@@ -102,8 +105,7 @@ function buildScopedForecastQuery(
   version: string,
   forecastMode: 'month' | 'week' | 'day',
 ) {
-  const granularity: 'month' | 'week' =
-    version === CURRENT_FORECAST_VERSION && forecastMode === 'week' ? 'week' : 'month';
+  const granularity = resolveForecastListGranularity(version, forecastMode);
   return {
     registrationIds,
     version,
@@ -111,6 +113,79 @@ function buildScopedForecastQuery(
     endPeriod: dateRange.end.slice(0, 7),
     granularity,
   };
+}
+
+function orderRegistrationIdsForFetch(allIds: string[], priorityIds: Iterable<string>) {
+  const prioritySet = new Set(priorityIds);
+  const priority: string[] = [];
+  const rest: string[] = [];
+  const seen = new Set<string>();
+  for (const id of allIds) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (prioritySet.has(id)) priority.push(id);
+    else rest.push(id);
+  }
+  return [...priority, ...rest];
+}
+
+function buildForecastScopeKey(
+  version: string,
+  dateRange: { start: string; end: string },
+  forecastMode: 'month' | 'week' | 'day',
+) {
+  return `${version}|${dateRange.start}|${dateRange.end}|${forecastMode}`;
+}
+
+function hashRegistrationIds(registrationIds: string[]) {
+  let hash = 0;
+  for (const id of registrationIds) {
+    for (let index = 0; index < id.length; index += 1) {
+      hash = (hash * 33 + id.charCodeAt(index)) | 0;
+    }
+    hash = (hash * 33 + id.length) | 0;
+  }
+  return hash >>> 0;
+}
+
+function buildForecastPriorityIds(allIds: string[], displayedIds: string[]) {
+  const priority: string[] = [];
+  const seen = new Set<string>();
+
+  for (const id of displayedIds) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    priority.push(id);
+    if (priority.length >= FORECAST_PRIORITY_REGISTRATION_COUNT) {
+      return priority;
+    }
+  }
+
+  for (const id of allIds) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    priority.push(id);
+    if (priority.length >= FORECAST_PRIORITY_REGISTRATION_COUNT) {
+      break;
+    }
+  }
+
+  return priority;
+}
+
+interface ForecastScopeCacheEntry {
+  loadedAt: number;
+  registrationSig: string;
+  fcstFetched: boolean;
+  fcstPriorityLoaded: boolean;
+}
+
+function buildRegistrationLoadSignature(
+  writeEpoch: number,
+  registrationIds: string[],
+  filterKey = '',
+) {
+  return `${writeEpoch}|${registrationIds.length}|${hashRegistrationIds(registrationIds)}|${filterKey}`;
 }
 
 interface PendingCellEdit {
@@ -486,6 +561,29 @@ export default function App() {
   const handleFormulaChange = useCallback((regId: string, formula: PriceFormula) => {
     setFormulaMap(prev => new Map(prev).set(regId, formula));
   }, []);
+  const [spreadMap, setSpreadMap] = useState<Map<string, number>>(new Map());
+  const handleSpreadChange = useCallback((regId: string, spread: number) => {
+    setSpreadMap(prev => new Map(prev).set(regId, spread));
+  }, []);
+  const handleSpreadCommit = useCallback(async (regId: string, spread: number) => {
+    const committedBy = authUser?.name || authUser?.email || 'sales-forecast-web';
+    try {
+      await api.registrations.updateSpread(regId, spread, committedBy);
+      setRegistrations(previous =>
+        previous.map(registration =>
+          registration.id === regId ? { ...registration, spread } : registration
+        )
+      );
+      setManagedRegistrations(previous =>
+        previous.map(registration =>
+          registration.id === regId ? { ...registration, spread } : registration
+        )
+      );
+      setAppError(null);
+    } catch (error) {
+      setAppError(error instanceof ApiError ? error.message : 'Failed to save spread');
+    }
+  }, [authUser?.email, authUser?.name]);
   const [fixedPriceMap, setFixedPriceMap] = useState<Map<string, Map<string, number>>>(new Map());
   const handleFixedPriceChange = useCallback((regId: string, month: string, price: number) => {
     if (!Number.isFinite(price) || price < 0) return;
@@ -613,13 +711,42 @@ export default function App() {
   const loadMoreAbortRef = useRef<AbortController | null>(null);
   const registrationLoadGenerationRef = useRef(0);
   const initialForecastLoadCompleteRef = useRef(false);
+  const [initialForecastLoadComplete, setInitialForecastLoadComplete] = useState(false);
+  const selectedVersionRef = useRef(selectedVersion);
   const registrationsRef = useRef(registrations);
   useEffect(() => {
     registrationsRef.current = registrations;
   }, [registrations]);
+  useEffect(() => {
+    selectedVersionRef.current = selectedVersion;
+  }, [selectedVersion]);
+  const versionsRef = useRef(versions);
+  useEffect(() => {
+    versionsRef.current = versions;
+  }, [versions]);
+  const forecastModeRef = useRef(forecastMode);
+  useEffect(() => {
+    forecastModeRef.current = forecastMode;
+  }, [forecastMode]);
+  const dateRangeRef = useRef(dateRange);
+  useEffect(() => {
+    dateRangeRef.current = dateRange;
+  }, [dateRange]);
+
+  // Read-through cache for the scoped forecast fetch. Skips refetch when the user
+  // toggles back to a (version + date range + mode) that is already loaded.
+  const forecastScopeCacheRef = useRef<{
+    registrationSig: string;
+    scopes: Map<string, ForecastScopeCacheEntry>;
+  }>({ registrationSig: '', scopes: new Map() });
+  const forecastBackgroundAbortRef = useRef<AbortController | null>(null);
+  const forecastWriteEpochRef = useRef(0);
+  const pendingEditsCountRef = useRef(0);
+  const displayedRegistrationIdsRef = useRef<string[]>([]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isTableDataLoading, setIsTableDataLoading] = useState(false);
+  const [forecastLoadProgress, setForecastLoadProgress] = useState<ForecastLoadProgress | null>(null);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [registrationCursor, setRegistrationCursor] = useState<string | null>(null);
   const [hasMoreRegistrations, setHasMoreRegistrations] = useState(true);
@@ -803,6 +930,7 @@ export default function App() {
       (Object.entries(columnFilters) as Array<[string, ColumnFilterValue]>)
         .filter(([key, filter]) =>
           key !== 'priceFormula' &&
+          key !== 'spread' &&
           !key.startsWith('carry') &&
           !key.startsWith('inventory') &&
           filter.selectedValues.length > 0
@@ -815,6 +943,10 @@ export default function App() {
     () => JSON.stringify(serverRegistrationFilters),
     [serverRegistrationFilters]
   );
+  const serverRegistrationFiltersRef = useRef(serverRegistrationFilters);
+  useEffect(() => {
+    serverRegistrationFiltersRef.current = serverRegistrationFilters;
+  }, [serverRegistrationFilters]);
   useEffect(() => {
     try {
       const selectedValues = columnFilters.businessUnit?.selectedValues ?? [];
@@ -837,6 +969,354 @@ export default function App() {
       ),
     [serverRegistrationFilters]
   );
+
+  const applyPriceStateFromForecasts = useCallback((forecasts: ForecastValue[]) => {
+    const { fixedPrices, formulas } = seedPriceStateFromForecasts(forecasts);
+    if (fixedPrices.size > 0) {
+      setFixedPriceMap(previous => {
+        const next = new Map(previous);
+        for (const [regId, prices] of fixedPrices) {
+          const regPrices = new Map<string, number>(previous.get(regId));
+          for (const [pricingMonth, price] of prices) {
+            regPrices.set(pricingMonth, price);
+          }
+          next.set(regId, regPrices);
+        }
+        return next;
+      });
+    }
+    if (formulas.size > 0) {
+      setFormulaMap(previous => {
+        const next = new Map(previous);
+        for (const [regId, formula] of formulas) {
+          next.set(regId, formula);
+        }
+        return next;
+      });
+    }
+  }, []);
+
+  const mergeForecastChunk = useCallback((
+    forecasts: ForecastValue[],
+    options?: { seedPriceState?: boolean },
+  ) => {
+    if (forecasts.length === 0) return;
+    setForecastData(previous => {
+      const next = [...previous];
+      const position = new Map(
+        next.map((item, index) => [
+          `${item.registrationId}|${item.version}|${item.month}`,
+          index,
+        ])
+      );
+
+      for (const item of forecasts) {
+        const key = `${item.registrationId}|${item.version}|${item.month}`;
+        const knownIndex = position.get(key);
+        const existing = knownIndex !== undefined ? next[knownIndex] : undefined;
+        if (
+          existing &&
+          existing.registrationId === item.registrationId &&
+          existing.version === item.version &&
+          existing.month === item.month
+        ) {
+          next[knownIndex] = {
+            ...existing,
+            qtyFcst: item.qtyFcst,
+            priceFcst: item.priceFcst,
+            amountFcst: item.amountFcst ?? existing.amountFcst,
+          };
+        } else {
+          position.set(key, next.length);
+          next.push({
+            ...item,
+            qtyAct: existing?.qtyAct ?? item.qtyAct ?? 0,
+            priceAct: existing?.priceAct ?? item.priceAct ?? 0,
+            amountAct: existing?.amountAct ?? item.amountAct,
+            carryInETD: existing?.carryInETD ?? item.carryInETD,
+            carryOutETD: existing?.carryOutETD ?? item.carryOutETD,
+            carryInLoading: existing?.carryInLoading ?? item.carryInLoading,
+            carryOutLoading: existing?.carryOutLoading ?? item.carryOutLoading,
+          });
+        }
+      }
+
+      forecastPositionRef.current = position;
+      forecastDataRef.current = next;
+      return next;
+    });
+    if (options?.seedPriceState) {
+      applyPriceStateFromForecasts(forecasts);
+    }
+  }, [applyPriceStateFromForecasts]);
+
+  const abortForecastBackgroundLoad = useCallback(() => {
+    forecastBackgroundAbortRef.current?.abort();
+    forecastBackgroundAbortRef.current = null;
+  }, []);
+
+  const markForecastScopeCached = useCallback((
+    version: string,
+    dateRange: { start: string; end: string },
+    forecastMode: 'month' | 'week' | 'day',
+    registrationSig: string,
+    entry: Pick<ForecastScopeCacheEntry, 'fcstFetched' | 'fcstPriorityLoaded'>,
+  ) => {
+    forecastScopeCacheRef.current.scopes.set(
+      buildForecastScopeKey(version, dateRange, forecastMode),
+      {
+        loadedAt: Date.now(),
+        registrationSig,
+        fcstFetched: entry.fcstFetched,
+        fcstPriorityLoaded: entry.fcstPriorityLoaded,
+      },
+    );
+  }, []);
+
+  const startForecastPhasedLoad = useCallback(({
+    registrationIds,
+    dateRange,
+    version,
+    forecastMode,
+    signal,
+    seedPriceStateOnFirstChunk = true,
+    priorityRegistrationIds,
+    silent = false,
+    onPriorityReady,
+  }: {
+    registrationIds: string[];
+    dateRange: { start: string; end: string };
+    version: string;
+    forecastMode: 'month' | 'week' | 'day';
+    signal?: AbortSignal;
+    seedPriceStateOnFirstChunk?: boolean;
+    priorityRegistrationIds?: string[];
+    silent?: boolean;
+    onPriorityReady?: () => void;
+  }): { priorityComplete: Promise<void>; allComplete: Promise<void> } => {
+    const orderedIds = orderRegistrationIdsForFetch(
+      registrationIds,
+      priorityRegistrationIds ?? displayedRegistrationIdsRef.current,
+    );
+    const priorityIds = orderedIds.slice(0, FORECAST_PRIORITY_REGISTRATION_COUNT);
+    const remainderIds = orderedIds.slice(FORECAST_PRIORITY_REGISTRATION_COUNT);
+    const remainderChunkCount = remainderIds.length > 0
+      ? Math.ceil(remainderIds.length / FORECAST_BACKGROUND_CHUNK_SIZE)
+      : 0;
+    const totalChunks = (priorityIds.length > 0 ? 1 : 0) + remainderChunkCount;
+
+    let resolvePriority!: () => void;
+    let rejectPriority!: (error: unknown) => void;
+    const priorityComplete = new Promise<void>((resolve, reject) => {
+      resolvePriority = resolve;
+      rejectPriority = reject;
+    });
+
+    const allComplete = (async () => {
+      const scopedQuery = buildScopedForecastQuery(registrationIds, dateRange, version, forecastMode);
+
+      const fetchIds = async (
+        ids: string[],
+        chunkIndex: number,
+        seedPriceState: boolean,
+      ) => {
+        if (ids.length === 0 || signal?.aborted) return;
+        const rows = await api.forecast.query({
+          version: scopedQuery.version,
+          startPeriod: scopedQuery.startPeriod,
+          endPeriod: scopedQuery.endPeriod,
+          granularity: scopedQuery.granularity,
+          registrationIds: ids,
+          signal,
+        });
+        mergeForecastChunk(rows, { seedPriceState });
+        if (!silent && totalChunks > 0) {
+          setForecastLoadProgress({
+            active: chunkIndex + 1 < totalChunks,
+            completedChunks: chunkIndex + 1,
+            totalChunks,
+            version,
+          });
+        }
+      };
+
+      try {
+        if (!silent && totalChunks > 0) {
+          setForecastLoadProgress({
+            active: true,
+            completedChunks: 0,
+            totalChunks,
+            version,
+          });
+        }
+
+        if (priorityIds.length > 0) {
+          await fetchIds(priorityIds, 0, seedPriceStateOnFirstChunk);
+        }
+        onPriorityReady?.();
+        resolvePriority();
+
+        let chunkIndex = 1;
+        for (let offset = 0; offset < remainderIds.length; offset += FORECAST_BACKGROUND_CHUNK_SIZE) {
+          if (signal?.aborted) return;
+          const chunkIds = remainderIds.slice(offset, offset + FORECAST_BACKGROUND_CHUNK_SIZE);
+          await fetchIds(chunkIds, chunkIndex, false);
+          chunkIndex += 1;
+        }
+      } catch (error) {
+        rejectPriority(error);
+        throw error;
+      } finally {
+        if (!silent) {
+          setForecastLoadProgress(null);
+        }
+      }
+    })();
+
+    return { priorityComplete, allComplete };
+  }, [mergeForecastChunk]);
+
+  const prefetchOtherForecastVersions = useCallback(({
+    registrationIds,
+    dateRange,
+    forecastMode,
+    versionsToLoad,
+    activeVersion,
+    registrationSig,
+    priorityRegistrationIds,
+  }: {
+    registrationIds: string[];
+    dateRange: { start: string; end: string };
+    forecastMode: 'month' | 'week' | 'day';
+    versionsToLoad: string[];
+    activeVersion: string;
+    registrationSig: string;
+    priorityRegistrationIds?: string[];
+  }) => {
+    const otherVersions = versionsToLoad.filter(version => version !== activeVersion);
+    if (otherVersions.length === 0) return;
+
+    abortForecastBackgroundLoad();
+    const controller = new AbortController();
+    forecastBackgroundAbortRef.current = controller;
+
+    ignorePromise((async () => {
+      for (const version of otherVersions) {
+        if (controller.signal.aborted) return;
+        const scopeKey = buildForecastScopeKey(version, dateRange, forecastMode);
+        const cached = forecastScopeCacheRef.current.scopes.get(scopeKey);
+        if (cached?.registrationSig === registrationSig && cached.fcstFetched) {
+          continue;
+        }
+
+        const { allComplete } = startForecastPhasedLoad({
+          registrationIds,
+          dateRange,
+          version,
+          forecastMode,
+          signal: controller.signal,
+          priorityRegistrationIds,
+          seedPriceStateOnFirstChunk: false,
+          silent: true,
+        });
+        await allComplete;
+        if (controller.signal.aborted) return;
+        markForecastScopeCached(version, dateRange, forecastMode, registrationSig, {
+          fcstPriorityLoaded: true,
+          fcstFetched: true,
+        });
+      }
+    })().catch(error => {
+      if (!controller.signal.aborted) {
+        console.warn('[forecast prefetch] background load failed:', error);
+      }
+    }));
+  }, [abortForecastBackgroundLoad, markForecastScopeCached, startForecastPhasedLoad]);
+
+  const loadAllForecastVersions = useCallback(async ({
+    registrationIds,
+    dateRange,
+    forecastMode,
+    versionsToLoad,
+    activeVersion,
+    signal,
+    priorityRegistrationIds,
+    filterKey = '',
+    waitForPriorityOnly = false,
+  }: {
+    registrationIds: string[];
+    dateRange: { start: string; end: string };
+    forecastMode: 'month' | 'week' | 'day';
+    versionsToLoad: string[];
+    activeVersion: string;
+    signal?: AbortSignal;
+    priorityRegistrationIds?: string[];
+    filterKey?: string;
+    waitForPriorityOnly?: boolean;
+  }) => {
+    if (registrationIds.length === 0 || versionsToLoad.length === 0) return;
+
+    const registrationSig = buildRegistrationLoadSignature(
+      forecastWriteEpochRef.current,
+      registrationIds,
+      filterKey,
+    );
+    forecastScopeCacheRef.current.registrationSig = registrationSig;
+
+    const activeScopeKey = buildForecastScopeKey(activeVersion, dateRange, forecastMode);
+    const cachedActive = forecastScopeCacheRef.current.scopes.get(activeScopeKey);
+    const activeIsFresh = cachedActive?.registrationSig === registrationSig && cachedActive.fcstFetched;
+
+    if (!activeIsFresh) {
+      const { priorityComplete, allComplete } = startForecastPhasedLoad({
+        registrationIds,
+        dateRange,
+        version: activeVersion,
+        forecastMode,
+        signal,
+        priorityRegistrationIds,
+        seedPriceStateOnFirstChunk: true,
+        silent: false,
+        onPriorityReady: () => {
+          markForecastScopeCached(activeVersion, dateRange, forecastMode, registrationSig, {
+            fcstPriorityLoaded: true,
+            fcstFetched: false,
+          });
+        },
+      });
+
+      await priorityComplete;
+      if (waitForPriorityOnly) {
+        ignorePromise(allComplete.then(() => {
+          if (signal?.aborted) return;
+          markForecastScopeCached(activeVersion, dateRange, forecastMode, registrationSig, {
+            fcstPriorityLoaded: true,
+            fcstFetched: true,
+          });
+        }).catch(error => {
+          if (!signal?.aborted) console.warn('[forecast] background active load failed:', error);
+        }));
+      } else {
+        await allComplete;
+        if (!signal?.aborted) {
+          markForecastScopeCached(activeVersion, dateRange, forecastMode, registrationSig, {
+            fcstPriorityLoaded: true,
+            fcstFetched: true,
+          });
+        }
+      }
+    }
+
+    prefetchOtherForecastVersions({
+      registrationIds,
+      dateRange,
+      forecastMode,
+      versionsToLoad,
+      activeVersion,
+      registrationSig,
+      priorityRegistrationIds,
+    });
+  }, [markForecastScopeCached, prefetchOtherForecastVersions, startForecastPhasedLoad]);
 
   const mergeLoadedForecastData = useCallback((
     forecasts: ForecastValue[],
@@ -922,6 +1402,118 @@ export default function App() {
     }
   }, []);
 
+  const mergeActualsIntoForecastState = useCallback((
+    acts: ActualValue[],
+    range: { startMonth: string; endMonth: string },
+    mode: 'month' | 'week' | 'day',
+  ) => {
+    const { startMonth, endMonth } = range;
+    const actualOnlyRegistrations = acts
+      .map(actual => actual.registration)
+      .filter((registration): registration is Registration => Boolean(registration));
+    const matchedRegistrationIds = new Set(
+      acts
+        .filter(actual => actual.sourceStatus === 'matched')
+        .map(actual => actual.registrationId)
+    );
+    setRegistrations(previous => {
+      const next = new Map(
+        previous
+          .filter(registration => registration.sourceStatus !== 'actual_only')
+          .map(registration => [
+            registration.id,
+            matchedRegistrationIds.has(registration.id)
+              ? { ...registration, sourceStatus: 'matched' as const }
+              : { ...registration, sourceStatus: 'registration_only' as const },
+          ])
+      );
+      actualOnlyRegistrations.forEach(registration => next.set(registration.id, registration));
+      return Array.from(next.values());
+    });
+
+    const activeVersions = versionsRef.current.length > 0
+      ? versionsRef.current
+      : ['Current Forecast'];
+    const actualMap = new Map(
+      acts.map(actual => [`${actual.registrationId}|${actual.month}`, actual])
+    );
+
+    setForecastData(previous => {
+      const next = new Map<string, ForecastValue>();
+
+      previous.forEach(item => {
+        const isRequestedPeriod = mode === 'week'
+          ? /^\d{4}-\d{2}-\d{2}$/.test(item.month)
+          : /^\d{4}-\d{2}$/.test(item.month);
+        const isInRequestedRange =
+          isRequestedPeriod &&
+          item.month.slice(0, 7) >= startMonth &&
+          item.month.slice(0, 7) <= endMonth;
+        const actual = isInRequestedRange
+          ? actualMap.get(`${item.registrationId}|${item.month}`)
+          : undefined;
+
+        next.set(`${item.registrationId}|${item.version}|${item.month}`, {
+          ...item,
+          ...(isInRequestedRange
+            ? {
+                qtyAct: actual?.qtyAct ?? 0,
+                priceAct: actual?.priceAct ?? 0,
+                amountAct: actual?.amountAct ?? 0,
+                carryInETD: actual?.carryInETD ?? 0,
+                carryOutETD: actual?.carryOutETD ?? 0,
+                carryInLoading: actual?.carryInLoading ?? 0,
+                carryOutLoading: actual?.carryOutLoading ?? 0,
+              }
+            : {}),
+        });
+      });
+
+      acts.forEach(actual => {
+        activeVersions.forEach(version => {
+          const key = `${actual.registrationId}|${version}|${actual.month}`;
+          if (next.has(key)) return;
+          next.set(key, {
+            registrationId: actual.registrationId,
+            month: actual.month,
+            version,
+            qtyAct: actual.qtyAct,
+            qtyFcst: 0,
+            priceAct: actual.priceAct,
+            amountAct: actual.amountAct,
+            carryInETD: actual.carryInETD,
+            carryOutETD: actual.carryOutETD,
+            carryInLoading: actual.carryInLoading,
+            carryOutLoading: actual.carryOutLoading,
+          });
+        });
+      });
+
+      return Array.from(next.values());
+    });
+  }, []);
+
+  const refreshActualsForLoadedRegistrations = useCallback(async (signal?: AbortSignal) => {
+    if (!initialForecastLoadCompleteRef.current) return;
+    const registrationIds = registrationsRef.current.map(registration => registration.id);
+    if (registrationIds.length === 0) return;
+
+    const { start, end } = dateRangeRef.current;
+    const startMonth = start.slice(0, 7);
+    const endMonth = end.slice(0, 7);
+    const mode = forecastModeRef.current;
+    const actualGranularity = mode === 'week' ? 'week' : 'month';
+    const acts = await api.actuals.list(
+      startMonth,
+      endMonth,
+      registrationIds,
+      serverRegistrationFiltersRef.current,
+      actualGranularity,
+      signal
+    );
+    mergeActualsIntoForecastState(acts, { startMonth, endMonth }, mode);
+  }, [mergeActualsIntoForecastState]);
+
   useEffect(() => {
     if (!manageRegistrationOpen) return;
 
@@ -960,16 +1552,24 @@ export default function App() {
         inventoryByRegistrationIdRef.current = new Map();
         setInventoryByRegistrationId(new Map());
         initialForecastLoadCompleteRef.current = false;
+        setInitialForecastLoadComplete(false);
+        hasSkippedInitialForecastScopeRefreshRef.current = false;
         setIsLoading(true);
         loadStart();
         setAppError(null);
         const [registrationPage, cpls, vers] = await Promise.all([
-          api.registrations.page(null, 80, {}, controller.signal),
+          api.registrations.page(
+            null,
+            REGISTRATION_PAGE_SIZE,
+            serverRegistrationFiltersRef.current,
+            controller.signal,
+          ),
           api.cpl.list(),
           api.versions.list(),
         ]);
         if (cancelled) return;
         const allVers = vers.length > 0 ? vers : ['Current Forecast'];
+        const allRegistrations = registrationPage.items;
         setVersions(allVers);
         setSelectedVersion(previous =>
           allVers.includes(previous) ? previous : allVers[0]
@@ -978,7 +1578,7 @@ export default function App() {
           allVers.includes(previous) ? previous : allVers[0]
         );
         if (generation !== registrationLoadGenerationRef.current) return;
-        setRegistrations(registrationPage.items);
+        setRegistrations(allRegistrations);
         ignorePromise(
           api.registrations.managed()
             .then(managed => {
@@ -1005,33 +1605,39 @@ export default function App() {
         setIsLoading(false);
         loadDone();
 
-        const registrationIds = registrationPage.items.map(reg => reg.id);
+        const registrationIds = allRegistrations.map(reg => reg.id);
         if (registrationIds.length === 0) return;
-        ignorePromise(loadInventoryForRegistrations(registrationPage.items, controller.signal));
+        ignorePromise(loadInventoryForRegistrations(allRegistrations, controller.signal));
 
         setIsTableDataLoading(true);
-        const [forecasts, actuals] = await Promise.all([
-          api.forecast.list({
-            ...buildScopedForecastQuery(
-              registrationIds,
-              dateRange,
-              selectedVersion,
-              forecastMode,
-            ),
-            signal: controller.signal,
-          }),
-          api.actuals.list(
-            dateRange.start.slice(0, 7),
-            dateRange.end.slice(0, 7),
-            registrationIds,
-            {},
-            forecastMode,
-            controller.signal
-          ),
-        ]);
+        const versionForInitialLoad = selectedVersionRef.current;
+        const actualsPromise = api.actuals.list(
+          dateRange.start.slice(0, 7),
+          dateRange.end.slice(0, 7),
+          registrationIds,
+          serverRegistrationFiltersRef.current,
+          forecastMode,
+          controller.signal
+        );
+        await loadAllForecastVersions({
+          registrationIds,
+          dateRange,
+          forecastMode,
+          versionsToLoad: allVers,
+          activeVersion: versionForInitialLoad,
+          signal: controller.signal,
+          priorityRegistrationIds: buildForecastPriorityIds(registrationIds, registrationIds),
+          filterKey: serverRegistrationFilterKey,
+          waitForPriorityOnly: true,
+        });
+        setIsTableDataLoading(false);
+        setForecastLoadProgress(null);
+        const actuals = await actualsPromise;
         if (!cancelled && generation === registrationLoadGenerationRef.current) {
-          mergeLoadedForecastData(forecasts, actuals, allVers);
+          mergeLoadedForecastData([], actuals, allVers);
           initialForecastLoadCompleteRef.current = true;
+          setInitialForecastLoadComplete(true);
+          hasSkippedInitialForecastScopeRefreshRef.current = true;
         }
       } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
@@ -1040,8 +1646,11 @@ export default function App() {
           setVersions([CURRENT_FORECAST_VERSION]);
         }
       } finally {
-        if (!cancelled) setIsLoading(false);
-        if (!cancelled) setIsTableDataLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+          setIsTableDataLoading(false);
+          setForecastLoadProgress(null);
+        }
         loadDone();
       }
     }
@@ -1050,7 +1659,7 @@ export default function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [loadInventoryForRegistrations, mergeLoadedForecastData, snapshotDataVersion]);
+  }, [loadAllForecastVersions, loadInventoryForRegistrations, mergeLoadedForecastData]);
 
   useEffect(() => {
     if (activeTab !== 'master') return;
@@ -1122,7 +1731,7 @@ export default function App() {
     try {
       const page = await api.registrations.page(
         registrationCursor,
-        80,
+        REGISTRATION_PAGE_SIZE,
         serverRegistrationFilters,
         controller.signal
       );
@@ -1139,28 +1748,47 @@ export default function App() {
       ignorePromise(loadInventoryForRegistrations(page.items, controller.signal));
 
       if (registrationIds.length > 0) {
-        const [forecasts, actuals] = await Promise.all([
-          api.forecast.list({
-            ...buildScopedForecastQuery(
-              registrationIds,
-              dateRange,
-              selectedVersion,
-              forecastMode,
-            ),
-            signal: controller.signal,
-          }),
-          api.actuals.list(
-            dateRange.start.slice(0, 7),
-            dateRange.end.slice(0, 7),
-            registrationIds,
-            serverRegistrationFilters,
-            forecastMode,
-            controller.signal
-          ),
-        ]);
+        const actualsPromise = api.actuals.list(
+          dateRange.start.slice(0, 7),
+          dateRange.end.slice(0, 7),
+          registrationIds,
+          serverRegistrationFilters,
+          forecastMode,
+          controller.signal
+        );
+        const { priorityComplete, allComplete } = startForecastPhasedLoad({
+          registrationIds,
+          dateRange,
+          version: selectedVersion,
+          forecastMode,
+          signal: controller.signal,
+          priorityRegistrationIds: registrationIds,
+          seedPriceStateOnFirstChunk: false,
+          silent: true,
+        });
+        await priorityComplete;
+        const actuals = await actualsPromise;
         if (generation === registrationLoadGenerationRef.current) {
-          mergeLoadedForecastData(forecasts, actuals, activeVersions);
+          mergeLoadedForecastData([], actuals, activeVersions);
         }
+        ignorePromise(allComplete.catch(error => {
+          if (!controller.signal.aborted) {
+            console.warn('[forecast] load-more background fill failed:', error);
+          }
+        }));
+        prefetchOtherForecastVersions({
+          registrationIds,
+          dateRange,
+          forecastMode,
+          versionsToLoad: activeVersions,
+          activeVersion: selectedVersion,
+          registrationSig: buildRegistrationLoadSignature(
+            forecastWriteEpochRef.current,
+            registrationsRef.current.map(registration => registration.id),
+            serverRegistrationFilterKey,
+          ),
+          priorityRegistrationIds: registrationIds,
+        });
       }
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -1172,6 +1800,7 @@ export default function App() {
       if (generation === registrationLoadGenerationRef.current) {
         isLoadingMoreRef.current = false;
         setIsLoadingMore(false);
+        setForecastLoadProgress(null);
       }
     }
   }, [
@@ -1180,8 +1809,11 @@ export default function App() {
     hasMoreRegistrations,
     loadInventoryForRegistrations,
     mergeLoadedForecastData,
+    prefetchOtherForecastVersions,
     registrationCursor,
+    serverRegistrationFilterKey,
     serverRegistrationFilters,
+    startForecastPhasedLoad,
     versions,
     forecastMode,
     selectedVersion,
@@ -1196,10 +1828,12 @@ export default function App() {
     const generation = registrationLoadGenerationRef.current + 1;
     registrationLoadGenerationRef.current = generation;
     loadMoreAbortRef.current?.abort();
+    abortForecastBackgroundLoad();
     isLoadingMoreRef.current = false;
     setIsLoadingMore(false);
     setIsTableDataLoading(true);
-    setRegistrations([]);
+    setForecastLoadProgress(null);
+    forecastScopeCacheRef.current = { registrationSig: '', scopes: new Map() };
     setRegistrationCursor(null);
     setHasMoreRegistrations(false);
 
@@ -1207,48 +1841,51 @@ export default function App() {
     const controller = new AbortController();
     async function loadFilteredRegistrations() {
       try {
-        const page = await api.registrations.page(
+        const registrationPage = await api.registrations.page(
           null,
-          80,
+          REGISTRATION_PAGE_SIZE,
           serverRegistrationFilters,
-          controller.signal
+          controller.signal,
         );
         if (cancelled || generation !== registrationLoadGenerationRef.current) return;
 
-        setRegistrations(page.items);
-        setRegistrationCursor(page.nextCursor);
-        setHasMoreRegistrations(page.hasMore);
-        ignorePromise(loadInventoryForRegistrations(page.items, controller.signal));
+        setRegistrations(registrationPage.items);
+        setRegistrationCursor(registrationPage.nextCursor);
+        setHasMoreRegistrations(registrationPage.hasMore);
+        ignorePromise(loadInventoryForRegistrations(registrationPage.items, controller.signal));
 
-        const registrationIds = page.items.map(reg => reg.id);
+        const registrationIds = registrationPage.items.map(reg => reg.id);
         if (registrationIds.length === 0) return;
 
         const activeVersions = versions.length > 0 ? versions : ['Current Forecast'];
-        const [forecasts, actuals] = await Promise.all([
-          api.forecast.list({
-            ...buildScopedForecastQuery(
-              registrationIds,
-              dateRange,
-              selectedVersion,
-              forecastMode,
-            ),
-            signal: controller.signal,
-          }),
-          api.actuals.list(
-            dateRange.start.slice(0, 7),
-            dateRange.end.slice(0, 7),
-            registrationIds,
-            serverRegistrationFilters,
-            forecastMode,
-            controller.signal
-          ),
-        ]);
+        const actualsPromise = api.actuals.list(
+          dateRange.start.slice(0, 7),
+          dateRange.end.slice(0, 7),
+          registrationIds,
+          serverRegistrationFilters,
+          forecastMode,
+          controller.signal
+        );
+        await loadAllForecastVersions({
+          registrationIds,
+          dateRange,
+          forecastMode,
+          versionsToLoad: activeVersions,
+          activeVersion: selectedVersion,
+          signal: controller.signal,
+          priorityRegistrationIds: buildForecastPriorityIds(registrationIds, registrationIds),
+          filterKey: serverRegistrationFilterKey,
+          waitForPriorityOnly: true,
+        });
+        setIsTableDataLoading(false);
+        setForecastLoadProgress(null);
+        const actuals = await actualsPromise;
         if (
           !cancelled &&
           !controller.signal.aborted &&
           generation === registrationLoadGenerationRef.current
         ) {
-          mergeLoadedForecastData(forecasts, actuals, activeVersions);
+          mergeLoadedForecastData([], actuals, activeVersions);
         }
       } catch (error) {
         if (!cancelled && generation === registrationLoadGenerationRef.current) {
@@ -1258,6 +1895,7 @@ export default function App() {
       } finally {
         if (!cancelled && generation === registrationLoadGenerationRef.current) {
           setIsTableDataLoading(false);
+          setForecastLoadProgress(null);
         }
       }
     }
@@ -1266,8 +1904,9 @@ export default function App() {
     return () => {
       cancelled = true;
       controller.abort();
+      setForecastLoadProgress(null);
     };
-  }, [serverRegistrationFilterKey]);
+  }, [serverRegistrationFilterKey, abortForecastBackgroundLoad, loadAllForecastVersions, mergeLoadedForecastData, versions, dateRange, forecastMode, selectedVersion, serverRegistrationFilters, loadInventoryForRegistrations]);
 
   useEffect(() => {
     if (!hasSkippedInitialActualRefreshRef.current) {
@@ -1278,104 +1917,10 @@ export default function App() {
     let cancelled = false;
     const controller = new AbortController();
     loadMoreAbortRef.current?.abort();
-    const startMonth = dateRange.start.slice(0, 7);
-    const endMonth = dateRange.end.slice(0, 7);
 
     async function refreshActuals() {
       try {
-        const registrationIds = registrations.map(reg => reg.id);
-        if (registrationIds.length === 0) return;
-        const acts = await api.actuals.list(
-          startMonth,
-          endMonth,
-          registrationIds,
-          serverRegistrationFilters,
-          forecastMode,
-          controller.signal
-        );
-        if (cancelled) return;
-
-        const actualOnlyRegistrations = acts
-          .map(actual => actual.registration)
-          .filter((registration): registration is Registration => Boolean(registration));
-        const matchedRegistrationIds = new Set(
-          acts
-            .filter(actual => actual.sourceStatus === 'matched')
-            .map(actual => actual.registrationId)
-        );
-        setRegistrations(previous => {
-          const next = new Map(
-            previous
-              .filter(registration => registration.sourceStatus !== 'actual_only')
-              .map(registration => [
-                registration.id,
-                matchedRegistrationIds.has(registration.id)
-                  ? { ...registration, sourceStatus: 'matched' as const }
-                  : { ...registration, sourceStatus: 'registration_only' as const },
-              ])
-          );
-          actualOnlyRegistrations.forEach(registration => next.set(registration.id, registration));
-          return Array.from(next.values());
-        });
-
-        const activeVersions = versions.length > 0 ? versions : ['Current Forecast'];
-        const actualMap = new Map(
-          acts.map(actual => [`${actual.registrationId}|${actual.month}`, actual])
-        );
-
-        setForecastData(previous => {
-          const next = new Map<string, ForecastValue>();
-
-          previous.forEach(item => {
-            const isRequestedPeriod = forecastMode === 'week'
-              ? /^\d{4}-\d{2}-\d{2}$/.test(item.month)
-              : /^\d{4}-\d{2}$/.test(item.month);
-            const isInRequestedRange =
-              isRequestedPeriod &&
-              item.month.slice(0, 7) >= startMonth &&
-              item.month.slice(0, 7) <= endMonth;
-            const actual = isInRequestedRange
-              ? actualMap.get(`${item.registrationId}|${item.month}`)
-              : undefined;
-
-            next.set(`${item.registrationId}|${item.version}|${item.month}`, {
-              ...item,
-              ...(isInRequestedRange
-                ? {
-                    qtyAct: actual?.qtyAct ?? 0,
-                    priceAct: actual?.priceAct ?? 0,
-                    amountAct: actual?.amountAct ?? 0,
-                    carryInETD: actual?.carryInETD ?? 0,
-                    carryOutETD: actual?.carryOutETD ?? 0,
-                    carryInLoading: actual?.carryInLoading ?? 0,
-                    carryOutLoading: actual?.carryOutLoading ?? 0,
-                  }
-                : {}),
-            });
-          });
-
-          acts.forEach(actual => {
-            activeVersions.forEach(version => {
-              const key = `${actual.registrationId}|${version}|${actual.month}`;
-              if (next.has(key)) return;
-              next.set(key, {
-                registrationId: actual.registrationId,
-                month: actual.month,
-                version,
-                qtyAct: actual.qtyAct,
-                qtyFcst: 0,
-                priceAct: actual.priceAct,
-                amountAct: actual.amountAct,
-                carryInETD: actual.carryInETD,
-                carryOutETD: actual.carryOutETD,
-                carryInLoading: actual.carryInLoading,
-                carryOutLoading: actual.carryOutLoading,
-              });
-            });
-          });
-
-          return Array.from(next.values());
-        });
+        await refreshActualsForLoadedRegistrations(controller.signal);
       } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
           const message = error instanceof ApiError ? error.message : 'Failed to refresh actual data';
@@ -1395,7 +1940,22 @@ export default function App() {
     serverRegistrationFilterKey,
     versions,
     forecastMode,
+    snapshotDataVersion,
+    refreshActualsForLoadedRegistrations,
   ]);
+
+  useEffect(() => {
+    if (activeTab !== 'forecast') return;
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      ignorePromise(refreshActualsForLoadedRegistrations());
+    }, 5 * 60 * 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activeTab, refreshActualsForLoadedRegistrations]);
 
   useEffect(() => {
     if (!initialForecastLoadCompleteRef.current) return;
@@ -1413,26 +1973,99 @@ export default function App() {
         const registrationIds = registrationsRef.current.map(registration => registration.id);
         if (registrationIds.length === 0) return;
 
-        setIsTableDataLoading(true);
-        const activeVersions = versions.length > 0 ? versions : ['Current Forecast'];
-        const forecasts = await api.forecast.list({
-          ...buildScopedForecastQuery(
-            registrationIds,
-            dateRange,
-            selectedVersion,
-            forecastMode,
-          ),
+        const registrationSig = buildRegistrationLoadSignature(
+          forecastWriteEpochRef.current,
+          registrationIds,
+          serverRegistrationFilterKey,
+        );
+        if (forecastScopeCacheRef.current.registrationSig !== registrationSig) {
+          forecastScopeCacheRef.current = { registrationSig, scopes: new Map() };
+        }
+        const scopeKey = buildForecastScopeKey(selectedVersion, dateRange, forecastMode);
+        const cachedScope = forecastScopeCacheRef.current.scopes.get(scopeKey);
+        if (
+          pendingEditsCountRef.current === 0 &&
+          cachedScope?.registrationSig === registrationSig &&
+          cachedScope.fcstFetched
+        ) {
+          return;
+        }
+
+        const priorityIds = buildForecastPriorityIds(
+          registrationIds,
+          displayedRegistrationIdsRef.current,
+        );
+
+        if (
+          pendingEditsCountRef.current === 0 &&
+          cachedScope?.registrationSig === registrationSig &&
+          cachedScope.fcstPriorityLoaded
+        ) {
+          ignorePromise((async () => {
+            const { allComplete } = startForecastPhasedLoad({
+              registrationIds,
+              dateRange,
+              version: selectedVersion,
+              forecastMode,
+              signal: controller.signal,
+              priorityRegistrationIds: priorityIds,
+              seedPriceStateOnFirstChunk: false,
+              silent: true,
+            });
+            await allComplete;
+            if (cancelled || controller.signal.aborted) return;
+            markForecastScopeCached(selectedVersion, dateRange, forecastMode, registrationSig, {
+              fcstPriorityLoaded: true,
+              fcstFetched: true,
+            });
+          })().catch(error => {
+            if (!cancelled && !controller.signal.aborted) {
+              console.warn('[forecast] background version fill failed:', error);
+            }
+          }));
+          return;
+        }
+
+        const { priorityComplete, allComplete } = startForecastPhasedLoad({
+          registrationIds,
+          dateRange,
+          version: selectedVersion,
+          forecastMode,
           signal: controller.signal,
+          priorityRegistrationIds: priorityIds,
+          seedPriceStateOnFirstChunk: false,
+          silent: false,
+          onPriorityReady: () => {
+            markForecastScopeCached(selectedVersion, dateRange, forecastMode, registrationSig, {
+              fcstPriorityLoaded: true,
+              fcstFetched: false,
+            });
+            setForecastLoadProgress(null);
+          },
         });
+        await priorityComplete;
         if (cancelled || controller.signal.aborted) return;
-        mergeLoadedForecastData(forecasts, [], activeVersions);
+        ignorePromise(allComplete.then(() => {
+          if (cancelled || controller.signal.aborted) return;
+          markForecastScopeCached(selectedVersion, dateRange, forecastMode, registrationSig, {
+            fcstPriorityLoaded: true,
+            fcstFetched: true,
+          });
+        }).catch(error => {
+          if (!cancelled && !controller.signal.aborted) {
+            const message = error instanceof ApiError ? error.message : 'Failed to refresh forecast data';
+            setAppError(message);
+          }
+        }));
       } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
           const message = error instanceof ApiError ? error.message : 'Failed to refresh forecast data';
           setAppError(message);
         }
       } finally {
-        if (!cancelled) setIsTableDataLoading(false);
+        if (!cancelled) {
+          setForecastLoadProgress(null);
+        }
       }
     }
 
@@ -1440,14 +2073,17 @@ export default function App() {
     return () => {
       cancelled = true;
       controller.abort();
+      setForecastLoadProgress(null);
     };
   }, [
     dateRange.end,
     dateRange.start,
     forecastMode,
-    mergeLoadedForecastData,
+    initialForecastLoadComplete,
+    markForecastScopeCached,
+    startForecastPhasedLoad,
     selectedVersion,
-    versions,
+    serverRegistrationFilterKey,
   ]);
 
   const openDatePicker = (input: HTMLInputElement | null) => {
@@ -1572,6 +2208,10 @@ export default function App() {
     return filteredRegistrations;
   }, [filteredRegistrations]);
 
+  useEffect(() => {
+    displayedRegistrationIdsRef.current = displayedRegistrations.map(registration => registration.id);
+  }, [displayedRegistrations]);
+
   const allDisplayedRegistrations = useMemo(
     () => registrationsWithInventory,
     [registrationsWithInventory]
@@ -1617,15 +2257,23 @@ export default function App() {
   }, [dateRange, forecastMode]);
 
   const forecastSummaryRequest = useMemo<ForecastSummaryRequest>(() => {
+    // formulaOverrides only affects the server total when a formula filter is
+    // active. Building it unconditionally makes the request change every time a
+    // new page seeds more non-CPL formulas, which needlessly refetches on scroll.
     const formulaOverrides: Record<string, string> = {};
-    formulaMap.forEach((formula, registrationId) => {
-      if (formula !== 'CPL') formulaOverrides[registrationId] = formula;
-    });
+    if (formulaFilter.selectedValues.length > 0) {
+      formulaMap.forEach((formula, registrationId) => {
+        if (formula !== 'CPL') formulaOverrides[registrationId] = formula;
+      });
+    }
     const carryFilters = Object.fromEntries(
       (Object.entries(columnFilters) as Array<[string, ColumnFilterValue]>)
         .filter(([key, filter]) => key.startsWith('carry') && filter.selectedValues.length > 0)
         .map(([key, filter]) => [key, filter.selectedValues])
     );
+    // Intentionally omit registrationIds: the server computes the grand total from
+    // the same filters. Scoping to the currently-loaded page IDs would refetch the
+    // summary on every pagination step (and make the footer grow as you scroll).
     return {
       startMonth: dateRange.start.slice(0, 7),
       endMonth: dateRange.end.slice(0, 7),
@@ -1636,7 +2284,6 @@ export default function App() {
       formulaFilter: formulaFilter.selectedValues,
       formulaOverrides,
       carryFilters,
-      registrationIds: registrations.map(registration => registration.id),
     };
   }, [
     columnFilters,
@@ -1646,7 +2293,6 @@ export default function App() {
     formulaFilter.selectedValues,
     formulaMap,
     monthsToShow,
-    registrations,
     selectedVersion,
     serverRegistrationFilters,
   ]);
@@ -1700,9 +2346,14 @@ export default function App() {
       });
 
     return () => controller.abort();
+    // Depend on the stringified request content only. The memoized request object
+    // gets a fresh reference whenever unrelated state (e.g. formulaMap growing as
+    // pages load) changes, but as long as the content key is identical there is no
+    // reason to refetch. forecastSummaryRequest is read inside and always matches
+    // the current key because both are derived in the same render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     activeTab,
-    forecastSummaryRequest,
     forecastSummaryRequestKey,
     monthsToShow.length,
   ]);
@@ -1820,6 +2471,7 @@ export default function App() {
 
   const pendingCommitEditCount =
     pendingForecastEditList.length + pendingPriceEditList.length + pendingAmountEditList.length;
+  pendingEditsCountRef.current = pendingCommitEditCount;
 
   const inventoryCommitPreviewRows = useMemo<InventoryCommitPreviewRow[]>(() => {
     const registrationsById = new Map<string, Registration>(
@@ -1967,6 +2619,7 @@ export default function App() {
     setPendingForecastEdits({});
     setPendingPriceEdits({});
     setPendingAmountEdits({});
+    forecastWriteEpochRef.current += 1;
     setForecastAuditVersion(version => version + 1);
     setForecastSummary(previous =>
       applyForecastSummaryEdits(previous, qtyEditsToCommit, selectedVersion, forecastMode)
@@ -2139,7 +2792,77 @@ export default function App() {
   const handleUpdateManagedRegistration = useCallback(async (registration: Registration) => {
     loadStart();
     try {
-      const saved = await api.registrations.update(registration);
+      const result = await api.registrations.update(registration);
+      if (isManagedRegistrationMerge(result)) {
+        const { crmRegistrationId, removedManagedId, forecastsMoved } = result;
+        setManagedRegistrations(previous =>
+          previous.filter(item => item.id !== removedManagedId)
+        );
+        setRegistrations(previous =>
+          previous.filter(item => item.id !== removedManagedId)
+        );
+        setForecastData(previous =>
+          previous.map(item =>
+            item.registrationId === removedManagedId
+              ? { ...item, registrationId: crmRegistrationId }
+              : item
+          )
+        );
+        setPendingForecastEdits(previous =>
+          previous.map(edit =>
+            edit.registrationId === removedManagedId
+              ? { ...edit, registrationId: crmRegistrationId }
+              : edit
+          )
+        );
+        setPendingPriceEdits(previous =>
+          previous.map(edit =>
+            edit.registrationId === removedManagedId
+              ? { ...edit, registrationId: crmRegistrationId }
+              : edit
+          )
+        );
+        setPendingAmountEdits(previous =>
+          previous.map(edit =>
+            edit.registrationId === removedManagedId
+              ? { ...edit, registrationId: crmRegistrationId }
+              : edit
+          )
+        );
+        setFormulaMap(previous => {
+          const next = new Map(previous);
+          const formula = next.get(removedManagedId);
+          if (formula) {
+            next.set(crmRegistrationId, formula);
+          }
+          next.delete(removedManagedId);
+          return next;
+        });
+        setFixedPriceMap(previous => {
+          const next = new Map(previous);
+          const price = next.get(removedManagedId);
+          if (price) {
+            next.set(crmRegistrationId, price);
+          }
+          next.delete(removedManagedId);
+          return next;
+        });
+        inventoryByRegistrationIdRef.current.delete(removedManagedId);
+        setInventoryByRegistrationId(previous => {
+          const next = new Map(previous);
+          next.delete(removedManagedId);
+          inventoryByRegistrationIdRef.current = next;
+          mergedRegistrationCacheRef.current.delete(removedManagedId);
+          mergedRegistrationCacheRef.current.delete(crmRegistrationId);
+          return next;
+        });
+        console.info(
+          `Merged managed registration ${removedManagedId} into CRM ${crmRegistrationId} (${forecastsMoved} forecast row(s) moved)`
+        );
+        return result;
+      }
+
+      const saved = result;
       setManagedRegistrations(previous =>
         previous.map(item => item.id === saved.id ? saved : item)
       );
@@ -2222,8 +2945,7 @@ export default function App() {
       setDateRange({ start: loadStartMonth, end: loadEndMonth });
     }
 
-    const actualGranularity: 'month' | 'week' =
-      targetVersion === CURRENT_FORECAST_VERSION && forecastMode === 'week' ? 'week' : 'month';
+    const actualGranularity = resolveForecastListGranularity(targetVersion, forecastMode);
 
     loadStart();
     try {
@@ -2274,6 +2996,7 @@ export default function App() {
       setPendingPriceEdits({});
       setPendingAmountEdits({});
       setForecastSummary(null);
+      forecastWriteEpochRef.current += 1;
       setForecastAuditVersion(version => version + 1);
     } finally {
       loadDone();
@@ -2293,8 +3016,18 @@ export default function App() {
     loadStart();
     try {
       const XLSX = await import('xlsx');
-      const data = registrations.map(reg => {
+      // Build the lookup index once (instead of a linear scan per cell) and reuse
+      // the same price/formula/spread maps the grid uses so exported values match
+      // what is on screen.
+      const exportForecastIndex = buildForecastIndex(forecastData);
+      const exportPriceMaps = {
+        cpl: new Map<string, number>(cplPrices.map(price => [price.month, price.price])),
+        naphtha: new Map<string, number>(naphthaprices.map(price => [price.month, price.price])),
+        benzene: new Map<string, number>(benzeneprices.map(price => [price.month, price.price])),
+      };
+      const data = displayedRegistrations.map(reg => {
         const row: Record<string, unknown> = { ...reg };
+        const formula = resolveRegistrationPriceFormula(formulaMap, reg);
         monthsToShow.forEach(m => {
           const { value } = getForecastCellValue(
             reg,
@@ -2305,7 +3038,14 @@ export default function App() {
             forecastData,
             cplPrices,
             forecastMode,
-            planningView
+            planningView,
+            exportForecastIndex,
+            formula,
+            naphthaprices,
+            benzeneprices,
+            fixedPriceMap,
+            exportPriceMaps,
+            spreadMap,
           );
           row[m] = value;
         });
@@ -2962,6 +3702,7 @@ export default function App() {
                                     
                                     setVersions(prev => prev.map(v => v === oldName ? newName : v));
                                     setForecastData(prev => prev.map(f => f.version === oldName ? { ...f, version: newName } : f));
+                                    forecastWriteEpochRef.current += 1;
                                     setSelectedVersion(newName);
                                     flash();
                                     setIsEditingVersion(false);
@@ -3137,6 +3878,9 @@ export default function App() {
                   planningView={planningView}
                   formulaMap={formulaMap}
                   onFormulaChange={handleFormulaChange}
+                  spreadMap={spreadMap}
+                  onSpreadChange={handleSpreadChange}
+                  onSpreadCommit={handleSpreadCommit}
                   formulaFilter={formulaFilter}
                   onFormulaFilterChange={setFormulaFilter}
                   naphthaprices={naphthaprices}
@@ -3145,6 +3889,7 @@ export default function App() {
                   onFixedPriceChange={handleFixedPriceChange}
                   onAmountChange={handleAmountChange}
                   isTableDataLoading={isTableDataLoading}
+                  forecastLoadProgress={forecastLoadProgress}
                   isLoadingMore={isLoadingMore}
                   hasMoreRows={hasMoreRegistrations}
                   onLoadMore={loadMoreRegistrations}

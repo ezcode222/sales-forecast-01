@@ -1,6 +1,7 @@
 import React, {
   RefObject,
   useCallback,
+  useDeferredValue,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -76,54 +77,7 @@ function scheduleDelayedCommit(
   }, INPUT_COMMIT_DELAY_MS);
 }
 
-function buildForecastIndex(forecastData: ForecastValue[]) {
-  const index = new Map<string, ForecastValue>();
-  const addAggregate = (key: string, item: ForecastValue) => {
-    const current = index.get(key);
-    index.set(key, {
-      ...item,
-      qtyAct: (current?.qtyAct ?? 0) + (item.qtyAct ?? 0),
-      qtyFcst: (current?.qtyFcst ?? 0) + (item.qtyFcst ?? 0),
-      amountAct: (current?.amountAct ?? 0) + (item.amountAct ?? 0),
-    });
-  };
-
-  forecastData.forEach(item => {
-    index.set(`${item.registrationId}|${item.version}|${item.month}`, item);
-    const actualKey = `actual|${item.registrationId}|${item.month}`;
-    const currentActual = index.get(actualKey);
-    const hasActualData =
-      item.qtyAct !== 0 ||
-      (item.amountAct ?? 0) !== 0 ||
-      (item.carryInETD ?? 0) !== 0 ||
-      (item.carryOutETD ?? 0) !== 0 ||
-      (item.carryInLoading ?? 0) !== 0 ||
-      (item.carryOutLoading ?? 0) !== 0;
-    if (!currentActual || hasActualData) index.set(actualKey, item);
-
-    if (/^\d{4}-\d{2}-\d{2}$/.test(item.month)) {
-      addAggregate(
-        `dailyMonth|${item.registrationId}|${item.version}|${item.month.slice(0, 7)}`,
-        item
-      );
-    } else if (isWeekRangeKey(item.month)) {
-      const [start, end] = item.month.split('|');
-      const months = new Set<string>();
-      const cursor = new Date(`${start}T00:00:00Z`);
-      const endDate = new Date(`${end}T00:00:00Z`);
-      while (cursor <= endDate) {
-        months.add(cursor.toISOString().slice(0, 7));
-        cursor.setUTCDate(cursor.getUTCDate() + 1);
-      }
-      months.forEach(month => addAggregate(
-        `weeklyMonth|${item.registrationId}|${item.version}|${month}`,
-        item
-      ));
-    }
-  });
-  return index;
-}
-import { getForecastCellValue, monthKey, resolveRegistrationPriceFormula } from './forecastCellUtils';
+import { buildForecastIndex, getForecastCellValue, monthKey, resolveRegistrationPriceFormula } from './forecastCellUtils';
 import {
   forecastBodyCellClass,
   forecastFooterCellClass,
@@ -160,6 +114,7 @@ interface ScrollableMonthGridProps {
   forecastMode: 'month' | 'week' | 'day';
   planningView: 'sale' | 'accounting' | 'production';
   formulaMap: Map<string, PriceFormula>;
+  spreadMap: Map<string, number>;
   naphthaprices: CPLPrice[];
   benzeneprices: CPLPrice[];
   fixedPriceMap: Map<string, Map<string, number>>;
@@ -168,6 +123,7 @@ interface ScrollableMonthGridProps {
   carryDetailVisibility: CarryDetailVisibility;
   forecastSummary: ForecastSummary | null;
   isForecastSummaryUpdating: boolean;
+  isScopeDataLoading?: boolean;
   forecastAuditVersion: number;
 }
 
@@ -232,6 +188,7 @@ export function ScrollableMonthGrid({
   forecastMode,
   planningView,
   formulaMap,
+  spreadMap,
   naphthaprices,
   benzeneprices,
   fixedPriceMap,
@@ -240,6 +197,7 @@ export function ScrollableMonthGrid({
   carryDetailVisibility,
   forecastSummary,
   isForecastSummaryUpdating,
+  isScopeDataLoading = false,
   forecastAuditVersion,
 }: ScrollableMonthGridProps) {
   const [availableWidth, setAvailableWidth] = useState(0);
@@ -271,8 +229,10 @@ export function ScrollableMonthGrid({
 
   const ROW_HEIGHT = FORECAST_TABLE_METRICS.bodyRowHeight;
   const OVERSCAN = 2;
-  const visibleStart = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
-  const visibleEnd = Math.min(registrations.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
+  const maxScrollTop = Math.max(0, registrations.length * ROW_HEIGHT - viewportHeight);
+  const clampedScrollTop = Math.min(scrollTop, maxScrollTop);
+  const visibleStart = Math.max(0, Math.floor(clampedScrollTop / ROW_HEIGHT) - OVERSCAN);
+  const visibleEnd = Math.min(registrations.length, Math.ceil((clampedScrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
   const visibleRegistrations = registrations.slice(visibleStart, visibleEnd);
   const topSpacerHeight = visibleStart * ROW_HEIGHT;
   const bottomSpacerHeight = Math.max(0, (registrations.length - visibleEnd) * ROW_HEIGHT);
@@ -409,6 +369,15 @@ export function ScrollableMonthGrid({
   }, [closeAuditTooltip, forecastAuditVersion]);
 
   const forecastIndex = useMemo(() => buildForecastIndex(forecastData), [forecastData]);
+  // Footer totals loop over every registration, so run that heavy work at a lower
+  // priority. Row cells keep using the non-deferred data for instant feedback,
+  // while LiveFooterTotals shows the correct value via draft deltas until the
+  // deferred base recompute (below) catches up.
+  const deferredForecastData = useDeferredValue(forecastData);
+  const deferredForecastIndex = useMemo(
+    () => buildForecastIndex(deferredForecastData),
+    [deferredForecastData]
+  );
   const cplPriceByMonth = useMemo(
     () => new Map(cplPrices.map(price => [price.month, price.price])),
     [cplPrices]
@@ -471,11 +440,11 @@ export function ScrollableMonthGrid({
           selectedVersion,
           'Qty',
           selectedType,
-          forecastData,
+          deferredForecastData,
           cplPrices,
           forecastMode,
           planningView,
-          forecastIndex,
+          deferredForecastIndex,
           resolveRegistrationPriceFormula(formulaMap, registration),
           naphthaprices,
           benzeneprices,
@@ -484,7 +453,8 @@ export function ScrollableMonthGrid({
             cpl: cplPriceByMonth,
             naphtha: naphthaPriceByMonth,
             benzene: benzenePriceByMonth,
-          }
+          },
+          spreadMap,
         );
         return sum + value;
       }, 0)
@@ -495,8 +465,8 @@ export function ScrollableMonthGrid({
       cplPriceByMonth,
       cplPrices,
       fixedPriceMap,
-      forecastData,
-      forecastIndex,
+      deferredForecastData,
+      deferredForecastIndex,
       forecastMode,
       formulaMap,
       monthsToShow,
@@ -506,6 +476,7 @@ export function ScrollableMonthGrid({
       registrations,
       selectedType,
       selectedVersion,
+      spreadMap,
     ]
   );
   const summaryFooterTotals = useMemo(
@@ -580,16 +551,17 @@ export function ScrollableMonthGrid({
               selectedVersion,
               'Qty',
               type,
-              forecastData,
+              deferredForecastData,
               cplPrices,
               forecastMode,
               planningView,
-              forecastIndex,
+              deferredForecastIndex,
               formula,
               naphthaprices,
               benzeneprices,
               fixedPriceMap,
               priceMaps,
+              spreadMap,
             ).value;
             const price = getForecastCellValue(
               registration,
@@ -597,16 +569,17 @@ export function ScrollableMonthGrid({
               selectedVersion,
               'Price',
               type,
-              forecastData,
+              deferredForecastData,
               cplPrices,
               forecastMode,
               planningView,
-              forecastIndex,
+              deferredForecastIndex,
               formula,
               naphthaprices,
               benzeneprices,
               fixedPriceMap,
               priceMaps,
+              spreadMap,
             ).value;
 
             if (!Number.isFinite(qty) || !Number.isFinite(price) || qty === 0) return;
@@ -631,11 +604,11 @@ export function ScrollableMonthGrid({
           selectedVersion,
           selectedDimension,
           selectedType,
-          forecastData,
+          deferredForecastData,
           cplPrices,
           forecastMode,
           planningView,
-          forecastIndex,
+          deferredForecastIndex,
           formula,
           naphthaprices,
           benzeneprices,
@@ -644,7 +617,8 @@ export function ScrollableMonthGrid({
             cpl: cplPriceByMonth,
             naphtha: naphthaPriceByMonth,
             benzene: benzenePriceByMonth,
-          }
+          },
+          spreadMap,
         );
         return sum + value;
       }, 0);
@@ -655,8 +629,8 @@ export function ScrollableMonthGrid({
       cplPriceByMonth,
       cplPrices,
       fixedPriceMap,
-      forecastData,
-      forecastIndex,
+      deferredForecastData,
+      deferredForecastIndex,
       forecastMode,
       formulaMap,
       monthsToShow,
@@ -667,11 +641,15 @@ export function ScrollableMonthGrid({
       selectedDimension,
       selectedType,
       selectedVersion,
+      spreadMap,
       summaryAmountFooterTotals,
       summaryFooterTotals,
       summaryWeightedPriceFooterTotals,
     ]
   );
+  const displayFooterTotals = isScopeDataLoading
+    ? monthsToShow.map(() => null)
+    : calculatedFooterTotals;
 
   const handleLiveDraftValueChange = useCallback((draft: LiveDraftValue) => {
     liveFooterTotalsRef.current?.setDraftValue(draft);
@@ -698,7 +676,7 @@ export function ScrollableMonthGrid({
       totals.set(
         period,
         registrations.reduce<CarryValues>((sum, registration) => {
-          const values = getCarryValues(registration.id, period, planningView, forecastIndex);
+          const values = getCarryValues(registration.id, period, planningView, deferredForecastIndex);
           return {
             carryIn: sum.carryIn + values.carryIn,
             carryOut: sum.carryOut + values.carryOut,
@@ -708,7 +686,7 @@ export function ScrollableMonthGrid({
       );
     });
     return totals;
-  }, [forecastIndex, monthsToShow, planningView, registrations, visibleCarryColumns.length]);
+  }, [deferredForecastIndex, monthsToShow, planningView, registrations, visibleCarryColumns.length]);
   const summaryCarryFooterTotals = useMemo(() => {
     const totals = new Map<string, CarryValues>();
     if (visibleCarryColumns.length === 0) return totals;
@@ -768,7 +746,8 @@ export function ScrollableMonthGrid({
         cpl: cplPriceByMonth,
         naphtha: naphthaPriceByMonth,
         benzene: benzenePriceByMonth,
-      }
+      },
+      spreadMap,
     ).value;
   }, [
     auditTooltip,
@@ -786,6 +765,7 @@ export function ScrollableMonthGrid({
     selectedDimension,
     selectedType,
     selectedVersion,
+    spreadMap,
   ]);
 
   return (
@@ -902,35 +882,43 @@ export function ScrollableMonthGrid({
                         cpl: cplPriceByMonth,
                         naphtha: naphthaPriceByMonth,
                         benzene: benzenePriceByMonth,
-                      }
+                      },
+                      spreadMap,
                     );
-                    const carryValues = visibleCarryColumns.length > 0
+                    const carryValues = visibleCarryColumns.length > 0 && !isScopeDataLoading
                       ? getCarryValues(reg.id, m, planningView, forecastIndex)
                       : null;
+                    const displayValue = isScopeDataLoading ? 0 : value;
+                    const showCellValue = !isScopeDataLoading;
                     return [
                       <td
                         key={`${m}|value`}
                         style={{ width: effectiveMonthWidth, minWidth: effectiveMonthWidth }}
                         onMouseEnter={event => {
+                          if (isScopeDataLoading) return;
                           cancelAuditTooltipClose();
-                          openAuditTooltip(event, reg.id, m, value);
+                          openAuditTooltip(event, reg.id, m, displayValue);
                         }}
                         onMouseLeave={() => scheduleAuditTooltipClose()}
                         className={cn(
                           'p-0 border-l border-slate-100 align-middle overflow-hidden relative',
-                          isEditable ? 'bg-blue-50/40' : 'bg-white'
+                          isScopeDataLoading
+                            ? 'bg-slate-50/80'
+                            : isEditable ? 'bg-blue-50/40' : 'bg-white'
                         )}
                       >
                         <div
                           className={cn(
                             forecastBodyCellClass,
                             'justify-end',
-                            isEditable ? 'text-slate-700' : 'text-slate-400 font-medium'
+                            isScopeDataLoading
+                              ? 'text-transparent'
+                              : isEditable ? 'text-slate-700' : 'text-slate-400 font-medium'
                           )}
                         >
-                          {isEditable ? (
+                          {showCellValue && isEditable ? (
                             <ForecastEditableCell
-                              value={value}
+                              value={displayValue}
                               identityKey={`${reg.id}|${m}|${selectedVersion}|${selectedDimension}|${selectedType}|${planningView}`}
                               regId={reg.id}
                               month={m}
@@ -940,10 +928,12 @@ export function ScrollableMonthGrid({
                               onAmountChange={onAmountChange}
                               onLiveValueChange={handleLiveDraftValueChange}
                             />
+                          ) : showCellValue ? (
+                            <span className="font-mono pr-1">{displayValue.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
                           ) : (
-                            <span className="font-mono pr-1">{value.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
+                            <span className="font-mono pr-1">&nbsp;</span>
                           )}
-                          {selectedDimension === 'Qty' && selectedType !== 'Act' && value !== 0 && (
+                          {showCellValue && selectedDimension === 'Qty' && selectedType !== 'Act' && displayValue !== 0 && (
                             <span className="pointer-events-none absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-blue-500/70" />
                           )}
                         </div>
@@ -955,10 +945,12 @@ export function ScrollableMonthGrid({
                           className="border-l border-cyan-100 bg-cyan-50/30 p-0 align-middle overflow-hidden"
                         >
                           <div className={cn(forecastBodyCellClass, 'justify-end font-mono text-cyan-800')}>
-                            {(carryValues?.[key] ?? 0).toLocaleString(undefined, {
-                              minimumFractionDigits: 3,
-                              maximumFractionDigits: 3,
-                            })}
+                            {showCellValue
+                              ? (carryValues?.[key] ?? 0).toLocaleString(undefined, {
+                                  minimumFractionDigits: 3,
+                                  maximumFractionDigits: 3,
+                                })
+                              : '\u00A0'}
                           </div>
                         </td>
                       )),
@@ -977,13 +969,13 @@ export function ScrollableMonthGrid({
                 <LiveFooterTotals
                   ref={liveFooterTotalsRef}
                   monthsToShow={monthsToShow}
-                  baseTotals={calculatedFooterTotals}
-                  liveEnabled={selectedDimension !== 'Price'}
+                  baseTotals={displayFooterTotals}
+                  liveEnabled={selectedDimension !== 'Price' && !isScopeDataLoading}
                   resetKey={`${selectedVersion}|${selectedDimension}|${selectedType}|${planningView}|${forecastMode}`}
                   visibleCarryColumns={visibleCarryColumns}
                   carryFooterTotals={summaryCarryFooterTotals}
                   columnWidth={effectiveMonthWidth}
-                  isUpdating={isForecastSummaryUpdating}
+                  isUpdating={isForecastSummaryUpdating || isScopeDataLoading}
                 />
               </tr>
             </tfoot>

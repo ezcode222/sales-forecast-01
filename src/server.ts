@@ -17,6 +17,8 @@ import appAdminRouter from './api/routes/appAdmin';
 import { startSnapshotScheduler } from './api/services/dataSnapshot';
 import { startOverplanScheduler } from './api/services/overplanWarmup';
 import { ensureHrEmployeeCache } from './api/services/employeeEmail';
+import { ensureCustomerMasterCache } from './api/services/customerMaster';
+import { ensureCplActualPrices } from './api/services/cplActualSync';
 import { ensureRoleDefaults } from './api/services/appRoles';
 import { createAuthRouter, getAppPath, normalizeBasePath, requireAuth } from './api/auth';
 
@@ -73,6 +75,8 @@ app.listen(PORT, () => {
   startSnapshotScheduler();
   startOverplanScheduler();
   ensureHrEmployeeCache()
+    .then(() => ensureCustomerMasterCache())
+    .then(() => ensureCplActualPrices())
     .then(() => ensureRoleDefaults())
     .catch(() => undefined);
 });

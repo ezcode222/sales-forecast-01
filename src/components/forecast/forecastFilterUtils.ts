@@ -43,6 +43,12 @@ export function getRegistrationFieldValue(reg: Registration, key: string): strin
       maximumFractionDigits: 3,
     });
   }
+  if (key === 'spread' && typeof value === 'number') {
+    return value.toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 4,
+    });
+  }
   return String(value ?? '');
 }
 

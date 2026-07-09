@@ -4,6 +4,7 @@ import { REG_COLUMN_KEYS } from '../../types/forecast';
 export const REG_COLUMN_WIDTH = 120;
 export const MONTH_COLUMN_WIDTH = 110;
 export const FORMULA_COLUMN_WIDTH = 130;
+export const SPREAD_COLUMN_WIDTH = 90;
 export const REG_PANE_MIN_WIDTH = 200;
 export const REG_PANE_MAX_RATIO = 0.75;
 
@@ -69,16 +70,22 @@ export const ALL_REG_COLUMNS: RegColumnDef[] = [
   { key: 'productName', label: 'Product Name' },
   { key: 'column1', label: 'Column 1' },
   { key: 'priceFormula', label: 'Formula' },
+  { key: 'spread', label: 'Spread' },
 ];
 
 const columnDefMap = Object.fromEntries(
   ALL_REG_COLUMNS.map(col => [col.key, col])
 ) as Record<RegColumnKey, RegColumnDef>;
 
-export const DEFAULT_COLUMN_ORDER: RegColumnKey[] = [...REG_COLUMN_KEYS];
+export const DEFAULT_COLUMN_ORDER: RegColumnKey[] = [
+  'priceFormula',
+  'spread',
+  ...REG_COLUMN_KEYS.filter(key => key !== 'priceFormula' && key !== 'spread'),
+];
 // Limit default visible columns to an approved, sensible subset
 export const DEFAULT_VISIBLE_COLUMN_KEYS: RegColumnKey[] = [
   'priceFormula',
+  'spread',
   'ownerName',
   'businessUnit',
   'registrationTopic',
@@ -111,7 +118,14 @@ export function getOrderedColumns(columnOrder: RegColumnKey[]): OrderedRegColumn
   return columnOrder
     .map(key => columnDefMap[key])
     .filter((col): col is RegColumnDef => Boolean(col))
-    .map(col => ({ ...col, width: col.key === 'priceFormula' ? FORMULA_COLUMN_WIDTH : REG_COLUMN_WIDTH }));
+    .map(col => ({
+      ...col,
+      width: col.key === 'priceFormula'
+        ? FORMULA_COLUMN_WIDTH
+        : col.key === 'spread'
+          ? SPREAD_COLUMN_WIDTH
+          : REG_COLUMN_WIDTH,
+    }));
 }
 
 export function getRegColumnsTotalWidth(columns: OrderedRegColumn[]): number {
