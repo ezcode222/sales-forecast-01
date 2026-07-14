@@ -3,6 +3,8 @@ import { Router } from 'express';
 import prisma from '../../db/prisma';
 import {
   aggregateOverplanRows,
+  clearOverplanDetailQtyCache,
+  getOverplanCompareDataStamp,
   loadOverplanDetailRows,
   resolveOverplanPeriods,
 } from '../services/overplanData';
@@ -11,10 +13,7 @@ import {
   type OverplanConfigThresholds,
   type OverplanResultRow,
 } from '../services/overplanEvaluation';
-import {
-  getFilteredRegistrationIds,
-  normalizeRegistrationFilters,
-} from './registrations';
+import { normalizeRegistrationFilters } from './registrations';
 import { sendOverplanNotificationEmails } from '../services/overplanNotification';
 import { buildOverplanNotificationPreviews } from '../services/notificationPreview';
 import { resolveComparePair } from '../services/overplanCompare';
@@ -70,8 +69,12 @@ export type OverplanEvaluateResponse = {
   rows: OverplanResultRow[];
 };
 
-export function clearOverplanEvaluateCache() {
+export function clearOverplanEvaluateCache(options?: { clearQty?: boolean }) {
   evaluationCoreCache.clear();
+  // Threshold/config saves should keep qty cache; data imports must clear both.
+  if (options?.clearQty !== false) {
+    clearOverplanDetailQtyCache();
+  }
   scheduleOverplanWarmup();
 }
 
@@ -82,20 +85,44 @@ export function scheduleOverplanWarmup() {
     try {
       const config = await getOrCreateConfig();
       const configUpdatedAt = config.updatedAt.toISOString();
-      await Promise.all([
-        getEvaluationCore(configUpdatedAt, {
-          ...DEFAULT_OVERPLAN_EVALUATE_BODY,
-          compareLeft: config.compareLeft,
-          compareRight: config.compareRight,
-          view: 'aggregate',
-        }),
-        getEvaluationCore(configUpdatedAt, {
-          ...DEFAULT_OVERPLAN_EVALUATE_BODY,
-          compareLeft: config.compareLeft,
-          compareRight: config.compareRight,
-          view: 'detail',
-        }),
-      ]);
+      const versions = await prisma.forecastVersion.findMany({
+        select: { name: true },
+        orderBy: { name: 'asc' },
+        take: 40,
+      });
+      const versionNames = versions.map(row => row.name);
+      const pairs = new Set<string>();
+      const addPair = (left: string, right: string) => {
+        if (!left || !right || left === right) return;
+        pairs.add(`${left}\u0001${right}`);
+      };
+      addPair(config.compareLeft ?? 'Actual', config.compareRight ?? CURRENT_FORECAST_VERSION);
+      addPair('Actual', CURRENT_FORECAST_VERSION);
+      for (const name of versionNames) {
+        if (/BB/i.test(name) || /baseline/i.test(name)) {
+          addPair(name, CURRENT_FORECAST_VERSION);
+        }
+      }
+
+      const jobs: Promise<unknown>[] = [];
+      for (const pair of pairs) {
+        const [compareLeft, compareRight] = pair.split('\u0001');
+        // Detail first so aggregate reuses the shared qty cache.
+        jobs.push(
+          getEvaluationCore(configUpdatedAt, {
+            ...DEFAULT_OVERPLAN_EVALUATE_BODY,
+            compareLeft,
+            compareRight,
+            view: 'detail',
+          }).then(() => getEvaluationCore(configUpdatedAt, {
+            ...DEFAULT_OVERPLAN_EVALUATE_BODY,
+            compareLeft,
+            compareRight,
+            view: 'aggregate',
+          }))
+        );
+      }
+      await Promise.all(jobs);
     } catch (error) {
       console.warn(
         '[overplan] warmup failed:',
@@ -247,7 +274,7 @@ router.patch('/config', async (req, res) => {
       create: { id: 'default', ...(data as object) },
       update: data,
     });
-    clearOverplanEvaluateCache();
+    clearOverplanEvaluateCache({ clearQty: false });
     res.json(serializeConfig(config));
   } catch (error) {
     console.error('[overplan] patch config error:', error);
@@ -343,9 +370,9 @@ async function buildEvaluationCore(body: Record<string, unknown>): Promise<Overp
   });
   const compareLabel = `${compareLeft} vs ${compareRight}`;
   const filters = normalizeRegistrationFilters(body.filters);
-  const registrationIds = await getFilteredRegistrationIds(filters);
+  // Detail qty is shared/cached across aggregate+detail and threshold-only cache busts.
   const detailRows = await loadOverplanDetailRows({
-    registrationIds,
+    filters,
     startMonth,
     endMonth,
     granularity,
@@ -401,10 +428,12 @@ async function buildEvaluationCore(body: Record<string, unknown>): Promise<Overp
 
 function evaluationCoreCacheKey(
   configUpdatedAt: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  dataStamp: string
 ) {
   return stableJson({
     configUpdatedAt,
+    dataStamp,
     startMonth: body.startMonth,
     endMonth: body.endMonth,
     view: body.view,
@@ -419,7 +448,10 @@ async function getEvaluationCore(
   configUpdatedAt: string,
   body: Record<string, unknown>
 ): Promise<OverplanEvaluationCore> {
-  const cacheKey = evaluationCoreCacheKey(configUpdatedAt, body);
+  const compareLeft = String(body.compareLeft ?? '');
+  const compareRight = String(body.compareRight ?? '');
+  const dataStamp = await getOverplanCompareDataStamp(compareLeft, compareRight);
+  const cacheKey = evaluationCoreCacheKey(configUpdatedAt, body, dataStamp);
   const cached = evaluationCoreCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.promise;

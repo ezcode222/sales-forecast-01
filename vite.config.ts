@@ -5,7 +5,7 @@ import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
-  const appBasePath = `/${(env.APP_BASE_PATH || '/nylon').replace(/^\/+|\/+$/g, '')}/`;
+  const appBasePath = `/${(env.APP_BASE_PATH || '/ugt-sales-forecast/nylon').replace(/^\/+|\/+$/g, '')}/`;
   const proxyBasePath = appBasePath.replace(/\/$/g, '');
   return {
     base: appBasePath,

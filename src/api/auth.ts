@@ -41,7 +41,7 @@ class AuthHttpError extends Error {
   }
 }
 
-export function normalizeBasePath(value = process.env.APP_BASE_PATH ?? '/nylon') {
+export function normalizeBasePath(value = process.env.APP_BASE_PATH ?? '/ugt-sales-forecast/nylon') {
   const trimmed = value.trim();
   if (!trimmed || trimmed === '/') return '';
   return `/${trimmed.replace(/^\/+/, '').replace(/\/+$/, '')}`;

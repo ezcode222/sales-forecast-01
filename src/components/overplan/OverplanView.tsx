@@ -347,24 +347,22 @@ export function OverplanView() {
       hasMoreRowsRef.current = false;
     }
 
-    const [loadedConfig, response] = await Promise.all([
-      api.overplan.getConfig(),
-      api.overplan.evaluate({
-        startMonth: startMonthRef.current,
-        endMonth: endMonthRef.current,
-        granularity: 'month',
-        compareLeft: configRef.current.compareLeft,
-        compareRight: configRef.current.compareRight,
-        view: viewRef.current,
-        breachOnly: true,
-        status,
-        page: 1,
-        pageSize: PAGE_SIZE,
-      }),
-    ]);
+    // Do not reload getConfig here — it overwrites unsaved compareLeft/Right
+    // (e.g. BB FY26 vs Current Forecast) with DB defaults (Actual vs Current Forecast).
+    const response = await api.overplan.evaluate({
+      startMonth: startMonthRef.current,
+      endMonth: endMonthRef.current,
+      granularity: 'month',
+      compareLeft: configRef.current.compareLeft,
+      compareRight: configRef.current.compareRight,
+      view: viewRef.current,
+      breachOnly: true,
+      status,
+      page: 1,
+      pageSize: PAGE_SIZE,
+    });
 
     if (generation !== evaluateGenRef.current) return null;
-    setConfig(normalizeOverplanConfig(loadedConfig));
     applyEvaluateResponse(response, status, { append: false });
     return response;
   }, [applyEvaluateResponse]);
@@ -476,6 +474,16 @@ export function OverplanView() {
       if (!cachedSession) setLoading(true);
       setRefreshing(Boolean(cachedSession));
       try {
+        // Load saved settings once on mount only (not on every refresh/run).
+        if (!cachedSession) {
+          const loadedConfig = await api.overplan.getConfig();
+          if (cancelled || generation !== evaluateGenRef.current) return;
+          const normalized = normalizeOverplanConfig(loadedConfig);
+          setConfig(normalized);
+          configRef.current = normalized;
+          setActiveCompareLeft(normalized.compareLeft ?? 'Actual');
+          setActiveCompareRight(normalized.compareRight ?? 'Current Forecast');
+        }
         await refreshEvaluate({
           status: breachPageRef.current,
           hardReset: !cachedSession,
@@ -685,7 +693,33 @@ export function OverplanView() {
         forecastVersions={forecastVersions}
         startMonth={startMonth}
         endMonth={endMonth}
-        onConfigChange={patch => setConfig(current => ({ ...current, ...patch }))}
+        onConfigChange={patch => {
+          setConfig(current => {
+            const next = { ...current, ...patch };
+            configRef.current = next;
+            return next;
+          });
+          // Prefetch so Run hits warm qty/eval cache after switching versions.
+          if (patch.compareLeft !== undefined || patch.compareRight !== undefined) {
+            window.setTimeout(() => {
+              evaluateGenRef.current += 1;
+              const generation = evaluateGenRef.current;
+              setRefreshing(true);
+              ignorePromise(
+                refreshEvaluate({
+                  status: breachPageRef.current,
+                  hardReset: false,
+                  generation,
+                }).finally(() => {
+                  if (generation === evaluateGenRef.current) {
+                    setRefreshing(false);
+                    setLoading(false);
+                  }
+                })
+              );
+            }, 150);
+          }
+        }}
         onStartMonthChange={setStartMonth}
         onEndMonthChange={setEndMonth}
       />

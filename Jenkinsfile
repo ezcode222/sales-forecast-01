@@ -13,7 +13,7 @@ pipeline {
 
   environment {
     CI = 'true'
-    APP_BASE_PATH = '/nylon'
+    APP_BASE_PATH = '/ugt-sales-forecast/nylon'
     APP_BASE_URL = 'https://ugtweb.ube.co.th'
     IMAGE_NAME = 'ugt-sales-forecast'
     CONTAINER_NAME = 'ugt-sales-forecast'

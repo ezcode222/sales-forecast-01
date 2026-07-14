@@ -14,7 +14,7 @@ if (!managed || !crmId) {
   process.exit(1);
 }
 
-const base = 'http://localhost:3001/nylon/api/registrations';
+const base = 'http://localhost:3001/ugt-sales-forecast/nylon/api/registrations';
 
 async function patchSpread(id, spread) {
   const response = await fetch(`${base}/${encodeURIComponent(id)}/spread`, {

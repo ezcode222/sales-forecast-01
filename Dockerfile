@@ -6,7 +6,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates openssl \
   && rm -rf /var/lib/apt/lists/*
 
-ARG APP_BASE_PATH=/nylon
+ARG APP_BASE_PATH=/ugt-sales-forecast/nylon
 ARG APP_BASE_URL=https://ugtweb.ube.co.th
 ENV APP_BASE_PATH=${APP_BASE_PATH}
 ENV APP_BASE_URL=${APP_BASE_URL}

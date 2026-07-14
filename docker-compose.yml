@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        APP_BASE_PATH: ${APP_BASE_PATH:-/nylon}
+        APP_BASE_PATH: ${APP_BASE_PATH:-/ugt-sales-forecast/nylon}
         APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
     image: ${IMAGE_NAME:-ugt-sales-forecast}:${IMAGE_TAG:-latest}
     container_name: ${CONTAINER_NAME:-ugt-sales-forecast}

@@ -38,7 +38,7 @@ export function getAppConfigPublic() {
     appMode: getAppMode(),
     allowedBusinessUnits: getAllowedBusinessUnits(),
     displayName: getAppDisplayName(),
-    basePath: process.env.APP_BASE_PATH ?? '/nylon',
+    basePath: process.env.APP_BASE_PATH ?? '/ugt-sales-forecast/nylon',
   };
 }
 

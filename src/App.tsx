@@ -162,6 +162,21 @@ function buildForecastScopeKey(
   return `${version}|${dateRange.start}|${dateRange.end}|${forecastMode}`;
 }
 
+/** Avoid treating an empty API response as a successful scope load (cells stay blank). */
+function hasForecastDataForScope(
+  forecastData: ForecastValue[],
+  version: string,
+  dateRange: { start: string; end: string },
+) {
+  const start = dateRange.start.slice(0, 7);
+  const end = dateRange.end.slice(0, 7);
+  return forecastData.some(item => {
+    if (item.version !== version) return false;
+    const periodMonth = monthKey(item.month);
+    return periodMonth >= start && periodMonth <= end;
+  });
+}
+
 function hashRegistrationIds(registrationIds: string[]) {
   let hash = 0;
   for (const id of registrationIds) {
@@ -1341,7 +1356,11 @@ export default function App() {
         if (controller.signal.aborted) return;
         const scopeKey = buildForecastScopeKey(version, dateRange, forecastMode);
         const cached = forecastScopeCacheRef.current.scopes.get(scopeKey);
-        if (cached?.registrationSig === registrationSig && cached.fcstFetched) {
+        if (
+          cached?.registrationSig === registrationSig &&
+          cached.fcstFetched &&
+          hasForecastDataForScope(forecastDataRef.current, version, dateRange)
+        ) {
           continue;
         }
 
@@ -1401,7 +1420,9 @@ export default function App() {
 
     const activeScopeKey = buildForecastScopeKey(activeVersion, dateRange, forecastMode);
     const cachedActive = forecastScopeCacheRef.current.scopes.get(activeScopeKey);
-    const activeIsFresh = cachedActive?.registrationSig === registrationSig && cachedActive.fcstFetched;
+    const activeIsFresh = cachedActive?.registrationSig === registrationSig
+      && cachedActive.fcstFetched
+      && hasForecastDataForScope(forecastDataRef.current, activeVersion, dateRange);
 
     if (!activeIsFresh) {
       const { priorityComplete, allComplete } = startForecastPhasedLoad({
@@ -2171,7 +2192,8 @@ export default function App() {
         if (
           pendingEditsCountRef.current === 0 &&
           cachedScope?.registrationSig === registrationSig &&
-          cachedScope.fcstFetched
+          cachedScope.fcstFetched &&
+          hasForecastDataForScope(forecastDataRef.current, selectedVersion, dateRange)
         ) {
           return;
         }
@@ -3842,7 +3864,16 @@ export default function App() {
                 <div className="relative min-w-0 flex-1">
                   <select
                     value={selectedVersion}
-                    onChange={e => { flash(); setSelectedVersion(e.target.value); }}
+                    onChange={e => {
+                      flash();
+                      const nextVersion = e.target.value;
+                      forecastWriteEpochRef.current += 1;
+                      forecastScopeCacheRef.current = {
+                        registrationSig: '',
+                        scopes: new Map(),
+                      };
+                      setSelectedVersion(nextVersion);
+                    }}
                     className="sf-select w-full min-w-0 text-xs border rounded p-1.5 outline-none appearance-none pr-8 transition-colors"
                     title={selectedVersion}
                   >
@@ -4777,7 +4808,7 @@ function CopyForecastVersionModal({
 
           <div className="rounded-lg border border-amber-100 bg-amber-50/60 px-3.5 py-3">
             <p className="text-xs leading-relaxed text-amber-900/80">
-              This replaces all forecast qty, price, and amount values in <span className="font-semibold">{targetVersion}</span> with data from the source version. Spread and price formula are not copied.
+              This replaces <span className="font-semibold">all</span> forecast qty, price, and amount values in <span className="font-semibold">{targetVersion}</span> with a full copy from the source (existing week/month rows in the target are removed). Spread and price formula are not copied.
             </p>
           </div>
         </div>
