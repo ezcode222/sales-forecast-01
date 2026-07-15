@@ -301,8 +301,9 @@ export function buildRegistrationCreateData(candidate: AutoCreateRegistrationPac
       commission: 0,
       commissionIndirect: 0,
       commissionFinancialDiscount: 0,
-      priceFormula: candidate.hasImportedPrice ? 'Fixed Price' : 'CPL',
+      priceFormula: candidate.hasImportedPrice && !candidate.pricingPolicy ? 'Fixed Price' : 'CPL',
       spread: candidate.spread ?? null,
+      pricingPolicy: candidate.pricingPolicy ?? null,
       createdBy: EXCEL_IMPORT_CREATED_BY,
     };
   }
@@ -341,8 +342,9 @@ export function buildRegistrationCreateData(candidate: AutoCreateRegistrationPac
     commission: 0,
     commissionIndirect: 0,
     commissionFinancialDiscount: 0,
-    priceFormula: candidate.hasImportedPrice ? 'Fixed Price' : 'CPL',
+    priceFormula: candidate.hasImportedPrice && !candidate.pricingPolicy ? 'Fixed Price' : 'CPL',
     spread: candidate.spread ?? null,
+    pricingPolicy: candidate.pricingPolicy ?? null,
     createdBy: EXCEL_IMPORT_CREATED_BY,
   };
 }
@@ -436,6 +438,7 @@ export function buildRepairManagedRegistrationData(row: {
     gradeSap: null,
     registrationTopic: null,
     spread: null,
+    pricingPolicy: null,
     hasImportedPrice: row.hasImportedPrice,
     pendingForecastRecords: [],
   });
@@ -474,6 +477,7 @@ function buildPackageBase(
     gradeSap: group.gradeSap,
     registrationTopic: group.registrationTopic,
     spread: group.spread,
+    pricingPolicy: group.pricingPolicy,
     hasImportedPrice,
     pendingForecastRecords,
   };

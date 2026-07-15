@@ -12,6 +12,7 @@ import type {
   RegColumnKey,
 } from '../../types/forecast';
 import { customColumnFilterKey, PRICE_FORMULA_OPTIONS } from '../../types/forecast';
+import { POLYMER_PRICING_POLICIES, normalizePricingPolicy } from '../../lib/pricingPolicy';
 import { CustomColumnHeader } from './CustomColumnHeader';
 import { DraggableRegColumnHeader } from './DraggableRegColumnHeader';
 import {
@@ -54,6 +55,8 @@ interface FixedColumnsTableProps {
   selectedDimension: Dimension;
   formulaMap: Map<string, PriceFormula>;
   onFormulaChange: (regId: string, formula: PriceFormula) => void;
+  pricingPolicyMap?: Map<string, string | null>;
+  onPricingPolicyChange?: (regId: string, pricingPolicy: string | null) => void;
   spreadMap: Map<string, string>;
   onSpreadChange: (regId: string, spread: string | null) => void;
   onSpreadCommit: (regId: string, spread: string | null) => void;
@@ -91,6 +94,8 @@ export function FixedColumnsTable({
   selectedDimension,
   formulaMap,
   onFormulaChange,
+  pricingPolicyMap,
+  onPricingPolicyChange,
   spreadMap,
   onSpreadChange,
   onSpreadCommit,
@@ -219,15 +224,35 @@ export function FixedColumnsTable({
                       className="p-0 border-r border-slate-100 bg-white align-middle overflow-hidden"
                     >
                       <div className={cn(forecastBodyCellClass, 'px-1.5')}>
-                        <select
-                          value={formulaMap.get(reg.id) ?? (PRICE_FORMULA_OPTIONS.includes(reg.priceFormula as PriceFormula) ? reg.priceFormula : 'CPL')}
-                          onChange={e => onFormulaChange(reg.id, e.target.value as PriceFormula)}
-                          className="sf-select w-full text-[10px] border rounded px-1 py-0.5 outline-none cursor-pointer appearance-none leading-tight"
-                        >
-                          {PRICE_FORMULA_OPTIONS.map(opt => (
-                            <option key={opt} value={opt}>{opt}</option>
-                          ))}
-                        </select>
+                        {String(reg.businessUnit ?? '').toLowerCase() === 'polymer' && onPricingPolicyChange ? (
+                          <select
+                            value={
+                              normalizePricingPolicy(
+                                pricingPolicyMap?.has(reg.id)
+                                  ? pricingPolicyMap.get(reg.id)
+                                  : reg.pricingPolicy
+                              ) ?? ''
+                            }
+                            onChange={e => onPricingPolicyChange(reg.id, e.target.value || null)}
+                            className="sf-select w-full text-[10px] border rounded px-1 py-0.5 outline-none cursor-pointer appearance-none leading-tight"
+                            title="Polymer Pricing Policy"
+                          >
+                            <option value="">(none)</option>
+                            {POLYMER_PRICING_POLICIES.map(opt => (
+                              <option key={opt} value={opt}>{opt}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <select
+                            value={formulaMap.get(reg.id) ?? (PRICE_FORMULA_OPTIONS.includes(reg.priceFormula as PriceFormula) ? reg.priceFormula : 'CPL')}
+                            onChange={e => onFormulaChange(reg.id, e.target.value as PriceFormula)}
+                            className="sf-select w-full text-[10px] border rounded px-1 py-0.5 outline-none cursor-pointer appearance-none leading-tight"
+                          >
+                            {PRICE_FORMULA_OPTIONS.map(opt => (
+                              <option key={opt} value={opt}>{opt}</option>
+                            ))}
+                          </select>
+                        )}
                       </div>
                     </td>
                   ) : col.key === 'spread' ? (

@@ -335,16 +335,36 @@ function createCodeChallenge(codeVerifier: string) {
   return crypto.createHash('sha256').update(codeVerifier).digest('base64url');
 }
 
-function getPublicBaseUrl() {
-  return (process.env.APP_BASE_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
+function getPublicBaseUrl(req?: Request) {
+  // Explicit override wins (set this in production, e.g. https://ugtweb.ube.co.th).
+  const configured = process.env.APP_BASE_URL?.trim();
+  if (configured) return configured.replace(/\/+$/, '');
+
+  // Otherwise derive from the incoming request so the deployed host is used
+  // instead of a hardcoded localhost. Honors reverse-proxy forwarded headers.
+  if (req) {
+    const forwardedProto = String(req.headers['x-forwarded-proto'] ?? '')
+      .split(',')[0]
+      .trim();
+    const forwardedHost = String(req.headers['x-forwarded-host'] ?? '')
+      .split(',')[0]
+      .trim();
+    const proto = forwardedProto || req.protocol || 'http';
+    const host = forwardedHost || String(req.headers.host ?? '').trim();
+    if (host) return `${proto}://${host}`.replace(/\/+$/, '');
+  }
+
+  // Last-resort dev fallback only (never reached in production where the host
+  // is always known from the request or APP_BASE_URL).
+  return 'http://localhost:3000';
 }
 
-function getCallbackUrl() {
-  return `${getPublicBaseUrl()}${normalizeBasePath()}/auth/callback`;
+function getCallbackUrl(req?: Request) {
+  return `${getPublicBaseUrl(req)}${normalizeBasePath()}/auth/callback`;
 }
 
-function getPostLogoutUrl() {
-  return `${getPublicBaseUrl()}${getAppPath()}`;
+function getPostLogoutUrl(req?: Request) {
+  return `${getPublicBaseUrl(req)}${getAppPath()}`;
 }
 
 function renderLoginPage(message?: string) {
@@ -737,7 +757,7 @@ export function createAuthRouter() {
     res.type('html').send(renderLoginPage());
   });
 
-  router.get('/start', async (_req, res) => {
+  router.get('/start', async (req, res) => {
     const basePath = normalizeBasePath();
     if (isDevAuthBypass()) {
       const sessionId = crypto.randomUUID();
@@ -755,7 +775,7 @@ export function createAuthRouter() {
       const state = encodeAuthStateToken(authState);
       authStates.set(state, authState);
       setOAuthStateCookie(res, state, authState);
-      const redirectUri = getCallbackUrl();
+      const redirectUri = getCallbackUrl(req);
       const authUrl = new URL(metadata.authorization_endpoint);
       authUrl.searchParams.set('response_type', 'code');
       authUrl.searchParams.set('client_id', process.env.KEYCLOAK_CLIENT_ID ?? 'ugt-sales-forecast');
@@ -789,7 +809,7 @@ export function createAuthRouter() {
 
     try {
       const metadata = await getOidcMetadata();
-      const redirectUri = getCallbackUrl();
+      const redirectUri = getCallbackUrl(req);
       const session = await exchangeCodeForSession(code, redirectUri, savedState.codeVerifier, metadata);
       const sessionId = crypto.randomUUID();
       sessions.set(sessionId, session);
@@ -808,7 +828,7 @@ export function createAuthRouter() {
       const sessionId = parseCookies(req.headers.cookie).get(SESSION_COOKIE);
       if (sessionId) sessions.delete(sessionId);
       clearSessionCookie(res);
-      return res.json({ ok: true, logoutUrl: getPostLogoutUrl() });
+      return res.json({ ok: true, logoutUrl: getPostLogoutUrl(req) });
     }
 
     const metadata = await getOidcMetadata().catch(error => {
@@ -823,14 +843,14 @@ export function createAuthRouter() {
       ? new URL(metadata.end_session_endpoint)
       : null;
     if (logoutUrl) {
-      logoutUrl.searchParams.set('post_logout_redirect_uri', getPostLogoutUrl());
+      logoutUrl.searchParams.set('post_logout_redirect_uri', getPostLogoutUrl(req));
       if (session?.idToken) logoutUrl.searchParams.set('id_token_hint', session.idToken);
       return res.json({
         ok: true,
         logoutUrl: logoutUrl.toString(),
       });
     }
-    res.json({ ok: true, logoutUrl: getPostLogoutUrl() });
+    res.json({ ok: true, logoutUrl: getPostLogoutUrl(req) });
   });
 
   return router;

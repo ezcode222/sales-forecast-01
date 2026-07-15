@@ -269,6 +269,13 @@ async function performRefresh() {
     syncCplActualPrices().catch(syncError => {
       console.error('[cplActual] sync after snapshot refresh failed:', syncError);
     });
+    // Keep FactForecast ↔ DimRegistration joins consistent (Power BI): re-point
+    // forecast rows whose registration key disappeared from DimRegistration
+    // (e.g. CRM topic rename / MainRegist moved to another row).
+    const { reconcileForecastRegistrationKeys } = await import('./registrationKeyReconcile');
+    reconcileForecastRegistrationKeys().catch(reconcileError => {
+      console.error('[registration-reconcile] failed:', reconcileError);
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await prisma.dataSnapshotState.update({

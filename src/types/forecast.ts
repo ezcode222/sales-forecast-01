@@ -1,7 +1,7 @@
 export type Dimension = 'Qty' | 'Price' | 'Amount';
 export type ValueType = 'Act' | 'Fcst' | 'Act-Fcst';
-export type PriceFormula = 'CPL' | 'Naphtha' | 'Benzene' | 'Fixed Price';
-export const PRICE_FORMULA_OPTIONS: PriceFormula[] = ['CPL', 'Naphtha', 'Benzene', 'Fixed Price'];
+export type PriceFormula = 'CPL' | 'Naphtha' | 'Benzene' | 'CPL (Tecnon)' | 'CPL (PCI)' | 'Fixed Price';
+export const PRICE_FORMULA_OPTIONS: PriceFormula[] = ['CPL', 'Naphtha', 'Benzene', 'CPL (Tecnon)', 'CPL (PCI)', 'Fixed Price'];
 export type CarryDetailKey = 'carryIn' | 'carryOut' | 'carryTotal';
 export type CarryDetailVisibility = Record<CarryDetailKey, boolean>;
 
@@ -132,6 +132,7 @@ export interface Registration {
   carryOutLoading: number;
   priceFormula: string;
   spread: string | null;
+  pricingPolicy?: string | null;
   createdBy?: string;
   inventoryA0Qty?: number;
   inventoryNonA0Qty?: number;
@@ -168,6 +169,10 @@ export interface PriceManagementRow {
   cplPrice: number;
   naphthaPrice: number;
   benzenePrice: number;
+  jpyUsdRate: number;
+  thbUsdRate: number;
+  cplTecnonPrice: number;
+  cplPciPrice: number;
 }
 
 export interface ActualValue {

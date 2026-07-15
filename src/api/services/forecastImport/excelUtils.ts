@@ -184,6 +184,29 @@ export function findSpreadColumnIndex(header: unknown[]) {
   return normalized.findIndex(value => /^spread/i.test(value));
 }
 
+export function findPricingPolicyColumnIndex(header: unknown[]) {
+  const normalized = header.map(value => normalizeHeader(value));
+  const exact = normalized.findIndex(value => {
+    const lower = value.toLowerCase();
+    return lower === 'pricing policy' || lower === 'pricingpolicy' || lower === 'price policy';
+  });
+  if (exact >= 0) return exact;
+  return normalized.findIndex(value => value.toLowerCase().startsWith('pricing policy'));
+}
+
+export function parsePricingPolicyCell(value: unknown) {
+  if (value === null || value === undefined) {
+    return { ok: true as const, value: null as string | null };
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return { ok: false as const };
+    return { ok: true as const, value: String(value) };
+  }
+  const text = unknownToDisplayString(value).trim();
+  if (text === '') return { ok: true as const, value: null as string | null };
+  return { ok: true as const, value: text };
+}
+
 export function parseSpreadCell(value: unknown) {
   if (value === null || value === undefined) {
     return { ok: true as const, value: null as string | null };

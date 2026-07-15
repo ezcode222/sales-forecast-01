@@ -16,7 +16,8 @@ import {
   isFirstWednesdayPeriod,
   normalizeKey,
 } from './excelUtils';
-import { upsertRegistrationSpread } from '../registrationPricing';
+import { upsertRegistrationPriceSettings, upsertRegistrationSpread } from '../registrationPricing';
+import { isCostPlus5Spread, normalizePricingPolicy } from '../../../lib/pricingPolicy';
 import { getActiveSnapshotVersion } from '../dataSnapshot';
 import { findRegistrationMatches } from './matching';
 import { normalizeStampPeriod } from './stampPeriod';
@@ -29,6 +30,7 @@ type ImportColumnFlags = {
   hasPriceColumns: boolean;
   hasAmountColumns: boolean;
   spreadByRegistrationId?: Record<string, string>;
+  pricingPolicyByRegistrationId?: Record<string, string>;
 };
 
 const LEGACY_IMPORT_COLUMN_FLAGS: ImportColumnFlags = {
@@ -142,6 +144,34 @@ async function applyImportedSpreads(
   for (const [registrationId, spread] of entries) {
     await upsertRegistrationSpread(registrationId, spread, changedBy);
   }
+}
+
+async function applyImportedPricingPolicies(
+  pricingPolicyByRegistrationId: Record<string, string> | undefined,
+  changedBy: string,
+) {
+  if (!pricingPolicyByRegistrationId) return;
+  const entries = Object.entries(pricingPolicyByRegistrationId);
+  for (const [registrationId, pricingPolicy] of entries) {
+    await upsertRegistrationPriceSettings(registrationId, {
+      pricingPolicy,
+      updatedBy: changedBy,
+    });
+  }
+}
+
+function registrationIdsWithLivePolicy(
+  pricingPolicyByRegistrationId: Record<string, string> | undefined,
+  spreadByRegistrationId: Record<string, string> | undefined,
+) {
+  const live = new Set<string>();
+  for (const [registrationId, policy] of Object.entries(pricingPolicyByRegistrationId ?? {})) {
+    if (normalizePricingPolicy(policy)) live.add(registrationId);
+  }
+  for (const [registrationId, spread] of Object.entries(spreadByRegistrationId ?? {})) {
+    if (isCostPlus5Spread(spread)) live.add(registrationId);
+  }
+  return live;
 }
 
 function parseLegacyRecords(records: ConfirmLegacyImportRecord[]): ConfirmLegacyImportRecord[] {
@@ -502,10 +532,14 @@ export async function confirmLegacyImport(
     }
 
     if (columnFlags.hasPriceColumns) {
+      const livePolicyIds = registrationIdsWithLivePolicy(
+        columnFlags.pricingPolicyByRegistrationId,
+        columnFlags.spreadByRegistrationId,
+      );
       const registrationIdsWithFixedPrice = [
         ...new Set(
           parsedRecords
-            .filter(record => record.priceFcst > 0)
+            .filter(record => record.priceFcst > 0 && !livePolicyIds.has(record.matchedRegistrationId))
             .map(record => record.matchedRegistrationId)
         ),
       ];
@@ -519,6 +553,7 @@ export async function confirmLegacyImport(
   }, { timeout: 120_000 });
 
   await applyImportedSpreads(columnFlags.spreadByRegistrationId, normalizedChangedBy);
+  await applyImportedPricingPolicies(columnFlags.pricingPolicyByRegistrationId, normalizedChangedBy);
 
   clearForecastSummaryCache();
   return buildImportResult(parsedRecords, existingKeys, CURRENT_FORECAST_VERSION, 'week');
@@ -677,10 +712,14 @@ export async function confirmVersionedImport(
     }
 
     if (columnFlags.hasPriceColumns) {
+      const livePolicyIds = registrationIdsWithLivePolicy(
+        columnFlags.pricingPolicyByRegistrationId,
+        columnFlags.spreadByRegistrationId,
+      );
       const registrationIdsWithFixedPrice = [
         ...new Set(
           parsedRecords
-            .filter(record => record.priceFcst > 0)
+            .filter(record => record.priceFcst > 0 && !livePolicyIds.has(record.matchedRegistrationId))
             .map(record => record.matchedRegistrationId)
         ),
       ];
@@ -694,6 +733,7 @@ export async function confirmVersionedImport(
   }, { timeout: 120_000 });
 
   await applyImportedSpreads(columnFlags.spreadByRegistrationId, normalizedChangedBy);
+  await applyImportedPricingPolicies(columnFlags.pricingPolicyByRegistrationId, normalizedChangedBy);
 
   clearForecastSummaryCache();
   return buildImportResult(parsedRecords, existingKeys, versionName, 'month');

@@ -122,6 +122,8 @@ export interface CurrentForecastImportPreview {
     skippedKeyGroups?: number;
     hasPriceColumns?: boolean;
     hasAmountColumns?: boolean;
+    pricingPoliciesDetected?: number;
+    unknownPricingPolicies?: number;
     excelTotalQty?: number;
     excelTotalAmount?: number;
     importTotalQty?: number;
@@ -687,6 +689,15 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify({ spread, updatedBy }),
       }),
+    updatePriceSettings: (
+      registrationId: string,
+      settings: { spread?: string | null; pricingPolicy?: string | null },
+      updatedBy?: string,
+    ): Promise<{ registrationId: string; spread: string | null; pricingPolicy: string | null }> =>
+      request(`/api/registrations/${encodeURIComponent(registrationId)}/price-settings`, {
+        method: 'PATCH',
+        body: JSON.stringify({ ...settings, updatedBy }),
+      }),
     remove: (registrationId: string): Promise<{ ok: boolean }> =>
       request(`/api/registrations/${encodeURIComponent(registrationId)}`, {
         method: 'DELETE',
@@ -847,6 +858,17 @@ export const api = {
       if (Object.keys(filters).length > 0) qs.set('filters', JSON.stringify(filters));
       const query = qs.toString();
       return request(`/api/actuals${query ? '?' + query : ''}`, { signal });
+    },
+    latestPrice: (
+      registrationIds: string[],
+      signal?: AbortSignal,
+    ): Promise<Array<{ registrationId: string; price: number }>> => {
+      if (registrationIds.length === 0) return Promise.resolve([]);
+      return request('/api/actuals/latest-price', {
+        method: 'POST',
+        body: JSON.stringify({ registrationIds }),
+        signal,
+      });
     },
   },
 

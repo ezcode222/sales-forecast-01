@@ -62,6 +62,8 @@ export interface ForecastInputTableProps {
   planningView: 'sale' | 'accounting' | 'production';
   formulaMap: Map<string, PriceFormula>;
   onFormulaChange: (regId: string, formula: PriceFormula) => void;
+  pricingPolicyMap?: Map<string, string | null>;
+  onPricingPolicyChange?: (regId: string, pricingPolicy: string | null) => void;
   spreadMap: Map<string, string>;
   onSpreadChange: (regId: string, spread: string | null) => void;
   onSpreadCommit: (regId: string, spread: string | null) => void;
@@ -69,6 +71,11 @@ export interface ForecastInputTableProps {
   onFormulaFilterChange: (v: ColumnFilterValue) => void;
   naphthaprices: CPLPrice[];
   benzeneprices: CPLPrice[];
+  jpyRates?: CPLPrice[];
+  thbRates?: CPLPrice[];
+  tecnonPrices?: CPLPrice[];
+  pciPrices?: CPLPrice[];
+  latestActualPriceMap?: Map<string, number>;
   fixedPriceMap: Map<string, Map<string, number>>;
   onFixedPriceChange: (regId: string, month: string, price: number) => void;
   onAmountChange: (regId: string, month: string, amount: number) => void;
@@ -118,6 +125,8 @@ function ForecastInputTableComponent({
   planningView,
   formulaMap,
   onFormulaChange,
+  pricingPolicyMap,
+  onPricingPolicyChange,
   spreadMap,
   onSpreadChange,
   onSpreadCommit,
@@ -125,6 +134,11 @@ function ForecastInputTableComponent({
   onFormulaFilterChange,
   naphthaprices,
   benzeneprices,
+  jpyRates,
+  thbRates,
+  tecnonPrices,
+  pciPrices,
+  latestActualPriceMap,
   fixedPriceMap,
   onFixedPriceChange,
   onAmountChange,
@@ -522,6 +536,8 @@ function ForecastInputTableComponent({
             selectedDimension={selectedDimension}
             formulaMap={formulaMap}
             onFormulaChange={onFormulaChange}
+            pricingPolicyMap={pricingPolicyMap}
+            onPricingPolicyChange={onPricingPolicyChange}
             spreadMap={spreadMap}
             onSpreadChange={onSpreadChange}
             onSpreadCommit={onSpreadCommit}
@@ -549,6 +565,12 @@ function ForecastInputTableComponent({
             spreadMap={spreadMap}
             naphthaprices={naphthaprices}
             benzeneprices={benzeneprices}
+            jpyRates={jpyRates}
+            thbRates={thbRates}
+            tecnonPrices={tecnonPrices}
+            pciPrices={pciPrices}
+            pricingPolicyMap={pricingPolicyMap}
+            latestActualPriceMap={latestActualPriceMap}
             fixedPriceMap={fixedPriceMap}
             onFixedPriceChange={onFixedPriceChange}
             onAmountChange={onAmountChange}
@@ -956,6 +978,20 @@ function ImportPreviewModal({
                   <PreviewStat label="Invalid Numbers" value={summary.invalidNumericValues} variant={summary.invalidNumericValues > 0 ? 'danger' : 'neutral'} />
                   <PreviewStat label="Create" value={summary.createRecords ?? 0} variant="success" />
                   <PreviewStat label="Overwrite" value={summary.overwriteRecords ?? 0} variant={(summary.overwriteRecords ?? 0) > 0 ? 'warning' : 'neutral'} />
+                  {(summary.pricingPoliciesDetected ?? 0) > 0 && (
+                    <PreviewStat
+                      label="Pricing Policies"
+                      value={summary.pricingPoliciesDetected ?? 0}
+                      variant="primary"
+                    />
+                  )}
+                  {(summary.unknownPricingPolicies ?? 0) > 0 && (
+                    <PreviewStat
+                      label="Unknown Policies"
+                      value={summary.unknownPricingPolicies ?? 0}
+                      variant="warning"
+                    />
+                  )}
                   <PreviewStat label="Matched" value={summary.matchedRows ?? 0} />
                   <PreviewStat label="Actual Only" value={summary.actualOnlyRows ?? 0} variant={(summary.actualOnlyRows ?? 0) > 0 ? 'warning' : 'neutral'} />
                   <PreviewStat label="Reg. Only" value={summary.registrationOnlyRows ?? 0} />

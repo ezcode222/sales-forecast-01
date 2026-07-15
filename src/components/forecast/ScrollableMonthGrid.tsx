@@ -117,6 +117,12 @@ interface ScrollableMonthGridProps {
   spreadMap: Map<string, string>;
   naphthaprices: CPLPrice[];
   benzeneprices: CPLPrice[];
+  jpyRates?: CPLPrice[];
+  thbRates?: CPLPrice[];
+  tecnonPrices?: CPLPrice[];
+  pciPrices?: CPLPrice[];
+  pricingPolicyMap?: Map<string, string | null>;
+  latestActualPriceMap?: Map<string, number>;
   fixedPriceMap: Map<string, Map<string, number>>;
   onFixedPriceChange: (regId: string, month: string, price: number) => void;
   onAmountChange: (regId: string, month: string, amount: number) => void;
@@ -191,6 +197,12 @@ export function ScrollableMonthGrid({
   spreadMap,
   naphthaprices,
   benzeneprices,
+  jpyRates = [],
+  thbRates = [],
+  tecnonPrices = [],
+  pciPrices = [],
+  pricingPolicyMap,
+  latestActualPriceMap,
   fixedPriceMap,
   onFixedPriceChange,
   onAmountChange,
@@ -390,6 +402,31 @@ export function ScrollableMonthGrid({
     () => new Map(benzeneprices.map(price => [price.month, price.price])),
     [benzeneprices]
   );
+  const jpyRateByMonth = useMemo(
+    () => new Map(jpyRates.map(price => [price.month, price.price])),
+    [jpyRates]
+  );
+  const thbRateByMonth = useMemo(
+    () => new Map(thbRates.map(price => [price.month, price.price])),
+    [thbRates]
+  );
+  const tecnonPriceByMonth = useMemo(
+    () => new Map(tecnonPrices.map(price => [price.month, price.price])),
+    [tecnonPrices]
+  );
+  const pciPriceByMonth = useMemo(
+    () => new Map(pciPrices.map(price => [price.month, price.price])),
+    [pciPrices]
+  );
+  const priceMaps = useMemo(() => ({
+    cpl: cplPriceByMonth,
+    naphtha: naphthaPriceByMonth,
+    benzene: benzenePriceByMonth,
+    jpy: jpyRateByMonth,
+    thb: thbRateByMonth,
+    tecnon: tecnonPriceByMonth,
+    pci: pciPriceByMonth,
+  }), [benzenePriceByMonth, cplPriceByMonth, jpyRateByMonth, naphthaPriceByMonth, pciPriceByMonth, tecnonPriceByMonth, thbRateByMonth]);
 
   /*
   const footerTotals = useMemo(
@@ -449,30 +486,28 @@ export function ScrollableMonthGrid({
           naphthaprices,
           benzeneprices,
           fixedPriceMap,
-          {
-            cpl: cplPriceByMonth,
-            naphtha: naphthaPriceByMonth,
-            benzene: benzenePriceByMonth,
-          },
+          priceMaps,
           spreadMap,
+          pricingPolicyMap,
+          latestActualPriceMap,
         );
         return sum + value;
       }, 0)
     ),
     [
-      benzenePriceByMonth,
       benzeneprices,
-      cplPriceByMonth,
       cplPrices,
       fixedPriceMap,
       deferredForecastData,
       deferredForecastIndex,
       forecastMode,
       formulaMap,
+      latestActualPriceMap,
       monthsToShow,
-      naphthaPriceByMonth,
       naphthaprices,
       planningView,
+      priceMaps,
+      pricingPolicyMap,
       registrations,
       selectedType,
       selectedVersion,
@@ -540,11 +575,6 @@ export function ScrollableMonthGrid({
 
           registrations.forEach(registration => {
             const formula = resolveRegistrationPriceFormula(formulaMap, registration);
-            const priceMaps = {
-              cpl: cplPriceByMonth,
-              naphtha: naphthaPriceByMonth,
-              benzene: benzenePriceByMonth,
-            };
             const qty = getForecastCellValue(
               registration,
               period,
@@ -562,6 +592,8 @@ export function ScrollableMonthGrid({
               fixedPriceMap,
               priceMaps,
               spreadMap,
+              pricingPolicyMap,
+              latestActualPriceMap,
             ).value;
             const price = getForecastCellValue(
               registration,
@@ -580,6 +612,8 @@ export function ScrollableMonthGrid({
               fixedPriceMap,
               priceMaps,
               spreadMap,
+              pricingPolicyMap,
+              latestActualPriceMap,
             ).value;
 
             if (!Number.isFinite(qty) || !Number.isFinite(price) || qty === 0) return;
@@ -613,30 +647,28 @@ export function ScrollableMonthGrid({
           naphthaprices,
           benzeneprices,
           fixedPriceMap,
-          {
-            cpl: cplPriceByMonth,
-            naphtha: naphthaPriceByMonth,
-            benzene: benzenePriceByMonth,
-          },
+          priceMaps,
           spreadMap,
+          pricingPolicyMap,
+          latestActualPriceMap,
         );
         return sum + value;
       }, 0);
     }),
     [
-      benzenePriceByMonth,
       benzeneprices,
-      cplPriceByMonth,
       cplPrices,
       fixedPriceMap,
       deferredForecastData,
       deferredForecastIndex,
       forecastMode,
       formulaMap,
+      latestActualPriceMap,
       monthsToShow,
-      naphthaPriceByMonth,
       naphthaprices,
       planningView,
+      priceMaps,
+      pricingPolicyMap,
       registrations,
       selectedDimension,
       selectedType,
@@ -742,25 +774,25 @@ export function ScrollableMonthGrid({
       naphthaprices,
       benzeneprices,
       fixedPriceMap,
-      {
-        cpl: cplPriceByMonth,
-        naphtha: naphthaPriceByMonth,
-        benzene: benzenePriceByMonth,
-      },
+      priceMaps,
       spreadMap,
+      pricingPolicyMap,
+      latestActualPriceMap,
     ).value;
   }, [
     auditTooltip,
     benzeneprices,
-    cplPriceByMonth,
     cplPrices,
     fixedPriceMap,
     forecastData,
     forecastIndex,
     forecastMode,
     formulaMap,
-    naphthaPriceByMonth,
+    latestActualPriceMap,
+    naphthaprices,
     planningView,
+    priceMaps,
+    pricingPolicyMap,
     registrations,
     selectedDimension,
     selectedType,
@@ -878,12 +910,10 @@ export function ScrollableMonthGrid({
                       naphthaprices,
                       benzeneprices,
                       fixedPriceMap,
-                      {
-                        cpl: cplPriceByMonth,
-                        naphtha: naphthaPriceByMonth,
-                        benzene: benzenePriceByMonth,
-                      },
+                      priceMaps,
                       spreadMap,
+                      pricingPolicyMap,
+                      latestActualPriceMap,
                     );
                     const carryValues = visibleCarryColumns.length > 0 && !isScopeDataLoading
                       ? getCarryValues(reg.id, m, planningView, forecastIndex)

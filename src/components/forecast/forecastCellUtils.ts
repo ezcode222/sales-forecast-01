@@ -4,6 +4,13 @@ import {
   firstWednesdayPeriod,
   isMonthPeriodKey,
 } from '../../lib/forecastPeriod';
+import {
+  computePolicyPrice,
+  isCostPlus5Spread,
+  normalizePricingPolicy,
+  resolvePricingSourceMonths,
+  type PolymerPricingPolicy,
+} from '../../lib/pricingPolicy';
 import { PRICE_FORMULA_OPTIONS } from '../../types/forecast';
 
 const isDailyKey = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -125,6 +132,33 @@ export function getForecastStoragePeriod(
   return displayPeriod;
 }
 
+export type ForecastPriceMaps = {
+  cpl: Map<string, number>;
+  naphtha: Map<string, number>;
+  benzene: Map<string, number>;
+  jpy?: Map<string, number>;
+  thb?: Map<string, number>;
+  tecnon?: Map<string, number>;
+  pci?: Map<string, number>;
+};
+
+function lookupPrice(map: Map<string, number> | undefined, arr: CPLPrice[] | undefined, month: string) {
+  return map?.get(month) ?? arr?.find(c => c.month === month)?.price ?? 0;
+}
+
+function averageCplForMonths(
+  months: string[],
+  priceMaps: ForecastPriceMaps | undefined,
+  cplPrices: CPLPrice[],
+) {
+  if (months.length === 0) return 0;
+  let sum = 0;
+  for (const m of months) {
+    sum += lookupPrice(priceMaps?.cpl, cplPrices, m);
+  }
+  return sum / months.length;
+}
+
 export function getForecastCellValue(
   reg: Registration,
   month: string,
@@ -140,12 +174,12 @@ export function getForecastCellValue(
   naphthaprices?: CPLPrice[],
   benzeneprices?: CPLPrice[],
   fixedPriceMap?: Map<string, Map<string, number>>,
-  priceMaps?: {
-    cpl: Map<string, number>;
-    naphtha: Map<string, number>;
-    benzene: Map<string, number>;
-  },
+  priceMaps?: ForecastPriceMaps,
   spreadMap?: Map<string, string>,
+  pricingPolicyMap?: Map<string, string | null>,
+  latestActualPriceMap?: Map<string, number>,
+  tecnonPrices?: CPLPrice[],
+  pciPrices?: CPLPrice[],
 ): { value: number; isEditable: boolean } {
   const directItem = forecastIndex
     ? forecastIndex.get(`${reg.id}|${selectedVersion}|${month}`)
@@ -236,28 +270,68 @@ export function getForecastCellValue(
   }
 
   const pricingMonth = monthKey(month);
-  const cpl = priceMaps?.cpl.get(pricingMonth) ?? cplPrices.find(c => c.month === pricingMonth)?.price ?? 0;
-  const naphtha = priceMaps?.naphtha.get(pricingMonth) ?? (naphthaprices ?? []).find(c => c.month === pricingMonth)?.price ?? 0;
-  const benzene = priceMaps?.benzene.get(pricingMonth) ?? (benzeneprices ?? []).find(c => c.month === pricingMonth)?.price ?? 0;
+  const cpl = lookupPrice(priceMaps?.cpl, cplPrices, pricingMonth);
+  const naphtha = lookupPrice(priceMaps?.naphtha, naphthaprices, pricingMonth);
+  const benzene = lookupPrice(priceMaps?.benzene, benzeneprices, pricingMonth);
+  const jpyRate = lookupPrice(priceMaps?.jpy, undefined, pricingMonth);
+  const thbRate = lookupPrice(priceMaps?.thb, undefined, pricingMonth);
+  const tecnon = lookupPrice(priceMaps?.tecnon, tecnonPrices, pricingMonth);
+  const pci = lookupPrice(priceMaps?.pci, pciPrices, pricingMonth);
 
   const pendingFixedPrice = fixedPriceMap?.get(reg.id)?.get(pricingMonth);
-  const storedFixedPrice =
-    pendingFixedPrice ??
-    (storedPriceFcst != null && storedPriceFcst > 0 ? storedPriceFcst : undefined) ??
-    (activeItem?.priceFcst != null && activeItem.priceFcst > 0 ? activeItem.priceFcst : undefined);
+  const storedRowPrice =
+    (storedPriceFcst != null && storedPriceFcst > 0 ? storedPriceFcst : undefined)
+    ?? (activeItem?.priceFcst != null && activeItem.priceFcst > 0 ? activeItem.priceFcst : undefined);
 
+  const spreadText = spreadMap?.has(reg.id)
+    ? (spreadMap.get(reg.id) ?? null)
+    : (reg.spread ?? null);
   const spread = spreadMap
     ? resolveRegistrationSpread(spreadMap, reg)
     : parseNumericSpread(reg.spread);
 
+  const policyRaw = pricingPolicyMap?.has(reg.id)
+    ? pricingPolicyMap.get(reg.id)
+    : reg.pricingPolicy;
+  const policy = normalizePricingPolicy(policyRaw);
+  const isPolymer = String(reg.businessUnit ?? '').toLowerCase() === 'polymer';
+  const isPolicyDriven =
+    isPolymer && (isCostPlus5Spread(spreadText) || policy !== null);
+
   let priceFcst: number;
   const resolvedFormula = formula ?? 'CPL';
-  if (storedFixedPrice != null) {
-    priceFcst = storedFixedPrice;
+  if (pendingFixedPrice != null) {
+    // Explicit session edit always wins.
+    priceFcst = pendingFixedPrice;
+  } else if (storedRowPrice != null) {
+    // Imported / stored price takes precedence over live policy calculation.
+    priceFcst = storedRowPrice;
+  } else if (isPolicyDriven) {
+    const sourceMonths = resolvePricingSourceMonths(policy as PolymerPricingPolicy | null, pricingMonth);
+    const primaryMonth = sourceMonths[0] ?? pricingMonth;
+    const policyCpl = lookupPrice(priceMaps?.cpl, cplPrices, primaryMonth);
+    const policyBz = lookupPrice(priceMaps?.benzene, benzeneprices, primaryMonth);
+    const cplAverage = policy === 'CPL-Q'
+      ? averageCplForMonths(sourceMonths, priceMaps, cplPrices)
+      : policyCpl;
+    const computed = computePolicyPrice(policy, {
+      cpl: policyCpl,
+      cplAverage,
+      benzene: policyBz,
+      jpyRate,
+      thbRate,
+      spreadText,
+      latestActualPrice: latestActualPriceMap?.get(reg.id),
+    });
+    priceFcst = computed ?? (cpl + spread);
   } else if (resolvedFormula === 'Naphtha') {
     priceFcst = naphtha;
   } else if (resolvedFormula === 'Benzene') {
     priceFcst = benzene;
+  } else if (resolvedFormula === 'CPL (Tecnon)') {
+    priceFcst = tecnon + spread;
+  } else if (resolvedFormula === 'CPL (PCI)') {
+    priceFcst = pci + spread;
   } else if (resolvedFormula === 'Fixed Price') {
     priceFcst = cpl + spread;
   } else {

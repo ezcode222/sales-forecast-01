@@ -64,20 +64,36 @@ async function fetchRows({
     cplPrice: unknown;
     naphthaPrice: unknown;
     benzenePrice: unknown;
+    jpyUsdRate: unknown;
+    thbUsdRate: unknown;
+    cplTecnonPrice: unknown;
+    cplPciPrice: unknown;
     fallbackCplPrice: unknown;
     currentCplPrice: unknown;
     currentNaphthaPrice: unknown;
     currentBenzenePrice: unknown;
+    currentJpyUsdRate: unknown;
+    currentThbUsdRate: unknown;
+    currentCplTecnonPrice: unknown;
+    currentCplPciPrice: unknown;
   }>>`
     SELECT
       months.[month],
       target.[cplPrice],
       target.[naphthaPrice],
       target.[benzenePrice],
+      target.[jpyUsdRate],
+      target.[thbUsdRate],
+      target.[cplTecnonPrice],
+      target.[cplPciPrice],
       legacy.[price] AS [fallbackCplPrice],
       currentFcst.[cplPrice] AS [currentCplPrice],
       currentFcst.[naphthaPrice] AS [currentNaphthaPrice],
-      currentFcst.[benzenePrice] AS [currentBenzenePrice]
+      currentFcst.[benzenePrice] AS [currentBenzenePrice],
+      currentFcst.[jpyUsdRate] AS [currentJpyUsdRate],
+      currentFcst.[thbUsdRate] AS [currentThbUsdRate],
+      currentFcst.[cplTecnonPrice] AS [currentCplTecnonPrice],
+      currentFcst.[cplPciPrice] AS [currentCplPciPrice]
     FROM (
       SELECT [month] FROM [dbo].[cpl_prices]
       UNION
@@ -105,6 +121,10 @@ async function fetchRows({
       cplPrice: Number(row?.cplPrice ?? row?.currentCplPrice ?? row?.fallbackCplPrice ?? 0),
       naphthaPrice: Number(row?.naphthaPrice ?? row?.currentNaphthaPrice ?? 0),
       benzenePrice: Number(row?.benzenePrice ?? row?.currentBenzenePrice ?? 0),
+      jpyUsdRate: Number(row?.jpyUsdRate ?? row?.currentJpyUsdRate ?? 0),
+      thbUsdRate: Number(row?.thbUsdRate ?? row?.currentThbUsdRate ?? 0),
+      cplTecnonPrice: Number(row?.cplTecnonPrice ?? row?.currentCplTecnonPrice ?? 0),
+      cplPciPrice: Number(row?.cplPciPrice ?? row?.currentCplPciPrice ?? 0),
     };
   });
 }
@@ -146,6 +166,10 @@ router.patch('/bulk', async (req, res) => {
         const cplPrice = numberOrZero(row.cplPrice);
         const naphthaPrice = numberOrZero(row.naphthaPrice);
         const benzenePrice = numberOrZero(row.benzenePrice);
+        const jpyUsdRate = numberOrZero(row.jpyUsdRate);
+        const thbUsdRate = numberOrZero(row.thbUsdRate);
+        const cplTecnonPrice = numberOrZero(row.cplTecnonPrice);
+        const cplPciPrice = numberOrZero(row.cplPciPrice);
         await tx.$executeRaw`
           MERGE [dbo].[price_management_values] AS target
           USING (SELECT ${month} AS [month], ${priceType} AS [priceType], ${versionName} AS [versionName]) AS source
@@ -157,10 +181,14 @@ router.patch('/bulk', async (req, res) => {
               [cplPrice] = ${cplPrice},
               [naphthaPrice] = ${naphthaPrice},
               [benzenePrice] = ${benzenePrice},
+              [jpyUsdRate] = ${jpyUsdRate},
+              [thbUsdRate] = ${thbUsdRate},
+              [cplTecnonPrice] = ${cplTecnonPrice},
+              [cplPciPrice] = ${cplPciPrice},
               [updatedAt] = CURRENT_TIMESTAMP
           WHEN NOT MATCHED THEN
-            INSERT ([month], [priceType], [versionName], [cplPrice], [naphthaPrice], [benzenePrice])
-            VALUES (${month}, ${priceType}, ${versionName}, ${cplPrice}, ${naphthaPrice}, ${benzenePrice});
+            INSERT ([month], [priceType], [versionName], [cplPrice], [naphthaPrice], [benzenePrice], [jpyUsdRate], [thbUsdRate], [cplTecnonPrice], [cplPciPrice])
+            VALUES (${month}, ${priceType}, ${versionName}, ${cplPrice}, ${naphthaPrice}, ${benzenePrice}, ${jpyUsdRate}, ${thbUsdRate}, ${cplTecnonPrice}, ${cplPciPrice});
         `;
         if (priceType === 'Fcst' && versionName === CURRENT_VERSION) {
           await tx.cplPrice.upsert({
@@ -203,10 +231,18 @@ router.post('/copy', async (req, res) => {
               [cplPrice] = ${row.cplPrice},
               [naphthaPrice] = ${row.naphthaPrice},
               [benzenePrice] = ${row.benzenePrice},
+              [jpyUsdRate] = ${row.jpyUsdRate},
+              [thbUsdRate] = ${row.thbUsdRate},
+              [cplTecnonPrice] = ${row.cplTecnonPrice},
+              [cplPciPrice] = ${row.cplPciPrice},
               [updatedAt] = CURRENT_TIMESTAMP
           WHEN NOT MATCHED THEN
-            INSERT ([month], [priceType], [versionName], [cplPrice], [naphthaPrice], [benzenePrice])
-            VALUES (${row.month}, N'Fcst', ${targetVersion}, ${row.cplPrice}, ${row.naphthaPrice}, ${row.benzenePrice});
+            INSERT ([month], [priceType], [versionName], [cplPrice], [naphthaPrice], [benzenePrice], [jpyUsdRate], [thbUsdRate], [cplTecnonPrice], [cplPciPrice])
+            VALUES (
+              ${row.month}, N'Fcst', ${targetVersion},
+              ${row.cplPrice}, ${row.naphthaPrice}, ${row.benzenePrice},
+              ${row.jpyUsdRate}, ${row.thbUsdRate}, ${row.cplTecnonPrice}, ${row.cplPciPrice}
+            );
         `;
       }
     });

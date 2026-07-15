@@ -32,7 +32,8 @@ import {
   buildVersionedAutoCreatePackage,
   collectAutoCreateCandidates,
 } from './autoCreateRegistrations';
-import { buildSpreadByRegistrationId } from './importSpread';
+import { isKnownPricingPolicy } from '../../../lib/pricingPolicy';
+import { buildPricingPolicyByRegistrationId, buildSpreadByRegistrationId } from './importSpread';
 import { storePreviewCache } from './previewCache';
 import type {
   AmountMismatchWarning,
@@ -92,6 +93,8 @@ export type VersionedPreviewResult = {
     groupedDuplicateKeys: number;
     skippedKeyGroups: number;
     amountMismatchWarnings: number;
+    pricingPoliciesDetected?: number;
+    unknownPricingPolicies?: number;
     excelTotalQty?: number;
     excelTotalAmount?: number;
     importTotalQty?: number;
@@ -324,6 +327,10 @@ export async function buildVersionedImportPreview(
     findActualSummaries(importableExcelKeys, forecastColumns),
   ]);
   const spreadByRegistrationId = buildSpreadByRegistrationId(excelGroups, registrationMatches);
+  const pricingPolicyByRegistrationId = buildPricingPolicyByRegistrationId(
+    excelGroups,
+    registrationMatches,
+  );
 
   const unmatchedRows: UnmatchedRowDiagnostic[] = [];
   const duplicateRegistrationMatches: Array<{
@@ -579,6 +586,10 @@ export async function buildVersionedImportPreview(
       (sum, candidate) => sum + candidate.pendingForecastRecords.reduce((inner, record) => inner + record.amountFcst, 0),
       0
     );
+  const pricingPoliciesDetected = [...excelGroups.values()].filter(group => group.pricingPolicy).length;
+  const unknownPricingPolicies = [...excelGroups.values()].filter(
+    group => group.pricingPolicy && !isKnownPricingPolicy(group.pricingPolicy)
+  ).length;
 
   const cacheEntry = storePreviewCache({
     importMode: 'versioned',
@@ -590,6 +601,7 @@ export async function buildVersionedImportPreview(
     amountMismatchCount: amountMismatchWarnings.length,
     autoCreateCandidates,
     spreadByRegistrationId,
+    pricingPolicyByRegistrationId,
   });
 
   return {
@@ -625,6 +637,8 @@ export async function buildVersionedImportPreview(
       groupedDuplicateKeys: duplicateExcelKeys.length,
       skippedKeyGroups: skippedKeyGroups.length,
       amountMismatchWarnings: amountMismatchWarnings.length,
+      pricingPoliciesDetected,
+      unknownPricingPolicies,
       excelTotalQty,
       excelTotalAmount,
       importTotalQty,

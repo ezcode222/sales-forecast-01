@@ -6,6 +6,7 @@ import {
 } from '../../../lib/forecastPeriod';
 import type { CurrentForecastImportPreview } from '../../../lib/api';
 import { businessUnitFromPlantCode } from '../businessUnit';
+import { isKnownPricingPolicy } from '../../../lib/pricingPolicy';
 import { CURRENT_FORECAST_VERSION, LEGACY_PREVIEW_CONTRACT_VERSION, PREVIEW_IMPORTABLE_SAMPLE_SIZE, PREVIEW_OVERWRITE_SAMPLE_SIZE, PREVIEW_UNIFIED_ROWS_SAMPLE_SIZE, PREVIEW_UNMATCHED_ROWS_SAMPLE_SIZE } from './constants';
 import { getOnOffFromKey, primarySourceEntry, unknownToDisplayString } from './excelUtils';
 import {
@@ -25,7 +26,7 @@ import {
   buildLegacyAutoCreatePackage,
   collectAutoCreateCandidates,
 } from './autoCreateRegistrations';
-import { buildSpreadByRegistrationId } from './importSpread';
+import { buildPricingPolicyByRegistrationId, buildSpreadByRegistrationId } from './importSpread';
 import type { ConfirmLegacyImportRecord, LegacyNormalizedImportRecord, UnifiedPreviewRow } from './types';
 import { storePreviewCache } from './previewCache';
 
@@ -151,6 +152,10 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
     findActualSummaries(importableExcelKeys, forecastColumns),
   ]);
   const spreadByRegistrationId = buildSpreadByRegistrationId(excelGroups, registrationMatches);
+  const pricingPolicyByRegistrationId = buildPricingPolicyByRegistrationId(
+    excelGroups,
+    registrationMatches,
+  );
 
   const unmatchedRows: Awaited<ReturnType<typeof diagnoseUnmatchedRows>> = [];
   const duplicateRegistrationMatches: Array<{
@@ -288,6 +293,7 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
     amountMismatchCount: 0,
     autoCreateCandidates,
     spreadByRegistrationId,
+    pricingPolicyByRegistrationId,
   });
 
   const unifiedPreviewRows: UnifiedPreviewRow[] = [];
@@ -406,6 +412,10 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
       (sum, candidate) => sum + candidate.pendingForecastRecords.reduce((inner, record) => inner + record.amountFcst, 0),
       0
     );
+  const pricingPoliciesDetected = [...excelGroups.values()].filter(group => group.pricingPolicy).length;
+  const unknownPricingPolicies = [...excelGroups.values()].filter(
+    group => group.pricingPolicy && !isKnownPricingPolicy(group.pricingPolicy)
+  ).length;
 
   return {
     previewId: cacheEntry.previewId,
@@ -417,6 +427,8 @@ export async function buildLegacyImportPreview(workbook: XLSX.WorkBook): Promise
       version: CURRENT_FORECAST_VERSION,
       hasPriceColumns,
       hasAmountColumns,
+      pricingPoliciesDetected,
+      unknownPricingPolicies,
       totalRows: totalDataRows,
       validRows: hasBlockingHeaderErrors ? 0 : totalDataRows,
       importableRecords: importableRecords.length + pendingImportRecords,

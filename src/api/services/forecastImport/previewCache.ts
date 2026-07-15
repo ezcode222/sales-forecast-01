@@ -22,6 +22,7 @@ export type CachedPreviewPayload = {
   amountMismatchCount: number;
   autoCreateCandidates?: AutoCreateRegistrationPackage[];
   spreadByRegistrationId?: Record<string, string>;
+  pricingPolicyByRegistrationId?: Record<string, string>;
   expiresAt: number;
 };
 

@@ -89,21 +89,26 @@ model PriceManagementValue {
   month        String   @db.NVarChar(7)
   priceType    String   @db.NVarChar(10)
   versionName  String   @db.NVarChar(100)
-  cplPrice     Decimal  @default(0) @db.Decimal(18, 4)
-  naphthaPrice Decimal  @default(0) @db.Decimal(18, 4)
-  benzenePrice Decimal  @default(0) @db.Decimal(18, 4)
-  updatedAt    DateTime @default(now()) @updatedAt
+  cplPrice       Decimal  @default(0) @db.Decimal(18, 4)
+  naphthaPrice   Decimal  @default(0) @db.Decimal(18, 4)
+  benzenePrice   Decimal  @default(0) @db.Decimal(18, 4)
+  jpyUsdRate     Decimal  @default(0) @db.Decimal(18, 4)
+  thbUsdRate     Decimal  @default(0) @db.Decimal(18, 4)
+  cplTecnonPrice Decimal  @default(0) @db.Decimal(18, 4)
+  cplPciPrice    Decimal  @default(0) @db.Decimal(18, 4)
+  updatedAt      DateTime @default(now()) @updatedAt
 
   @@id([month, priceType, versionName])
   @@index([priceType, versionName, month])
   @@map("price_management_values")
 }
 
-/// Per-registration spread override for CRM registration IDs (and optional override layer).
+/// Per-registration spread / pricing-policy override for CRM registration IDs.
 /// Stored as text so formula notes can be kept; numeric-only values are parsed for price math.
 model RegistrationPriceSetting {
   registrationId String   @id @db.NVarChar(200)
   spread         String?  @db.NVarChar(1000)
+  pricingPolicy  String?  @db.NVarChar(50)
   updatedAt      DateTime @default(now()) @updatedAt
   updatedBy      String?  @db.NVarChar(200)
 
@@ -165,6 +170,7 @@ model MasterDataCrmRegistration {
   gradeSap                    String?  @db.NVarChar(500)
   priceFormula                String   @default("CPL") @db.NVarChar(50)
   spread                      String?  @db.NVarChar(1000)
+  pricingPolicy               String?  @db.NVarChar(50)
   createdBy                   String   @default("sales-forecast-web") @db.NVarChar(100)
   createdAt                   DateTime @default(now())
   updatedAt                   DateTime @default(now()) @updatedAt

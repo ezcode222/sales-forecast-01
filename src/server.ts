@@ -29,6 +29,10 @@ const PORT = process.env.API_PORT || 3001;
 const basePath = normalizeBasePath();
 const distPath = path.resolve(process.cwd(), 'dist');
 
+// Behind the reverse proxy at ugtweb.ube.co.th: honor X-Forwarded-Proto/Host
+// so auth callback/redirect URLs use the real public host, not localhost.
+app.set('trust proxy', true);
+
 app.use(express.json({ limit: '5mb' }));
 
 const apiRouter = express.Router();
@@ -78,7 +82,11 @@ app.get([basePath, `${basePath}/*`], (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[server] listening on http://localhost:${PORT}${basePath || ''}`);
+  const publicUrl = process.env.APP_BASE_URL?.trim().replace(/\/+$/, '');
+  const shownUrl = publicUrl
+    ? `${publicUrl}${basePath || ''}`
+    : `http://localhost:${PORT}${basePath || ''}`;
+  console.log(`[server] listening on ${shownUrl} (port ${PORT})`);
   startSnapshotScheduler();
   startOverplanScheduler();
   ensureHrEmployeeCache()

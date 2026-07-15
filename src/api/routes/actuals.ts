@@ -209,6 +209,7 @@ function createActualOnlyRegistration(row: Record<string, unknown>, registration
     carryOutLoading: 0,
     priceFormula: '',
     spread: null,
+    pricingPolicy: null,
   };
 }
 
@@ -604,6 +605,92 @@ router.post('/query', async (req, res) => {
   } catch (error) {
     console.error('[actuals] POST query error:', error);
     res.status(500).json({ error: 'Failed to fetch actuals' });
+  }
+});
+
+/**
+ * Latest Actual price per registration = weighted avg (SUM amount / SUM qty)
+ * for the most recent calendar month that has qty > 0.
+ */
+router.post('/latest-price', async (req, res) => {
+  const rawRegistrationIds = Array.isArray(req.body?.registrationIds)
+    ? req.body.registrationIds
+    : [];
+  const registrationIds = [...new Set(rawRegistrationIds.map(String).filter(Boolean))].slice(0, 5000);
+  if (registrationIds.length === 0) {
+    return res.json([]);
+  }
+
+  try {
+    const snapshotVersion = await getActiveSnapshotVersion();
+    const registrationSource = actualRegistrationSourceSql(snapshotVersion);
+    const actualSource = actualSalesSourceSql(snapshotVersion);
+    const idsJson = JSON.stringify(registrationIds);
+
+    const rows = await prisma.$queryRaw<Array<{
+      registrationId: string;
+      price: unknown;
+    }>>`
+      WITH requested_ids AS (
+        SELECT CAST([value] AS NVARCHAR(200)) AS registrationId
+        FROM OPENJSON(${idsJson})
+      ),
+      registration_source AS (${registrationSource}),
+      actual_source AS (${actualSource}),
+      registration_map AS (
+        SELECT
+          registrationId,
+          keyForNoCRM,
+          ROW_NUMBER() OVER (PARTITION BY keyForNoCRM ORDER BY registrationId) AS matchOrder
+        FROM registration_source
+      ),
+      keyed AS (
+        SELECT
+          COALESCE(rm.registrationId, CAST(a.[Key for no regist] AS NVARCHAR(200))) AS registrationId,
+          CONVERT(CHAR(7), a.Deliverydate, 126) AS monthPeriod,
+          CAST(ISNULL(a.[Order Qty_TON], 0) AS FLOAT) AS qty,
+          CAST(ISNULL(a.[Net Amount USD (new)], 0) AS FLOAT) AS amount
+        FROM actual_source a
+        LEFT JOIN registration_map rm
+          ON rm.keyForNoCRM = CAST(a.[Key for no regist] AS NVARCHAR(500))
+         AND rm.matchOrder = 1
+        INNER JOIN requested_ids req
+          ON req.registrationId = COALESCE(rm.registrationId, CAST(a.[Key for no regist] AS NVARCHAR(200)))
+        WHERE a.Deliverydate IS NOT NULL
+          AND ISNULL(a.[Order Qty_TON], 0) > 0
+      ),
+      monthly AS (
+        SELECT
+          registrationId,
+          monthPeriod,
+          SUM(qty) AS qty,
+          SUM(amount) AS amount
+        FROM keyed
+        GROUP BY registrationId, monthPeriod
+      ),
+      ranked AS (
+        SELECT
+          registrationId,
+          CASE WHEN qty > 0 THEN amount / qty ELSE 0 END AS price,
+          ROW_NUMBER() OVER (
+            PARTITION BY registrationId
+            ORDER BY monthPeriod DESC
+          ) AS rn
+        FROM monthly
+        WHERE qty > 0
+      )
+      SELECT registrationId, price
+      FROM ranked
+      WHERE rn = 1
+    `;
+
+    res.json(rows.map(row => ({
+      registrationId: String(row.registrationId),
+      price: Number(row.price ?? 0),
+    })));
+  } catch (error) {
+    console.error('[actuals] POST latest-price error:', error);
+    res.status(500).json({ error: 'Failed to fetch latest actual prices' });
   }
 });
 

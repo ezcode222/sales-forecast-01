@@ -49,6 +49,7 @@ import {
   type EmailBatchPreview,
 } from './components/notifications/NotificationEmailPreviewModal';
 import { buildForecastIndex, getForecastCellValue, getForecastStoragePeriod, monthKey, resolveRegistrationPriceFormula } from './components/forecast/forecastCellUtils';
+import { isCostPlus5Spread, normalizePricingPolicy } from './lib/pricingPolicy';
 import { resolveForecastListGranularity } from './lib/forecastPeriod';
 import { filterRegistrations, matchesCustomColumnFilter } from './components/forecast/forecastFilterUtils';
 import { api, ApiError, FORECAST_BACKGROUND_CHUNK_SIZE, FORECAST_PRIORITY_REGISTRATION_COUNT, REGISTRATION_PAGE_SIZE, formatApiError, type AppConfig, type AuthUser, type SessionPermissions, type SnapshotStatus } from './lib/api';
@@ -104,6 +105,7 @@ const BU_FILTER_STORAGE_KEY_PREFIX = 'sales-forecast:business-unit-filter:v1';
 const STAMP_PERIOD_OPTIONS = ['No', 'Weekly1', 'Weekly2', 'Weekly3', 'Weekly4', 'Weekly5', 'Monthly1', 'Monthly2'];
 const CURRENT_FORECAST_VERSION = 'Current Forecast';
 const GLOBAL_PRICE_VERSION = 'GLOBAL';
+const ANALYTICS_POWER_BI_URL = 'https://app.powerbi.com/groups/08e1f1d7-5d67-43e1-b1ed-0f0930863c6f/reports/eaa3a0d9-22a9-4f03-848e-bcd4d401f2c0?ctid=0b702037-5428-4249-9606-56c40358141d&pbi_source=linkShare';
 
 function businessUnitStorageKey(appMode?: string) {
   return appMode ? `${BU_FILTER_STORAGE_KEY_PREFIX}:${appMode}` : BU_FILTER_STORAGE_KEY_PREFIX;
@@ -318,10 +320,14 @@ function withoutVersionEdits<T extends PendingCellEdit>(
   );
 }
 
-function seedPriceStateFromForecasts(forecasts: ForecastValue[]) {
+function seedPriceStateFromForecasts(
+  forecasts: ForecastValue[],
+  skipRegistrationIds?: Set<string>,
+) {
   const fixedPrices = new Map<string, Map<string, number>>();
   const formulas = new Map<string, PriceFormula>();
   for (const item of forecasts) {
+    if (skipRegistrationIds?.has(item.registrationId)) continue;
     const price = item.priceFcst ?? 0;
     if (price <= 0) continue;
     const pricingMonth = monthKey(item.month);
@@ -381,7 +387,33 @@ function mapLegacyCplPrices(prices: CPLPrice[]): PriceManagementRow[] {
     cplPrice: price.price,
     naphthaPrice: 0,
     benzenePrice: 0,
+    jpyUsdRate: 0,
+    thbUsdRate: 0,
+    cplTecnonPrice: 0,
+    cplPciPrice: 0,
   }));
+}
+
+function priceRowsToJpyRates(rows: PriceManagementRow[]): CPLPrice[] {
+  return rows.map(row => ({ month: row.month, price: row.jpyUsdRate }));
+}
+
+function priceRowsToThbRates(rows: PriceManagementRow[]): CPLPrice[] {
+  return rows.map(row => ({ month: row.month, price: row.thbUsdRate }));
+}
+
+function priceRowsToTecnonPrices(rows: PriceManagementRow[]): CPLPrice[] {
+  return rows.map(row => ({ month: row.month, price: row.cplTecnonPrice }));
+}
+
+function priceRowsToPciPrices(rows: PriceManagementRow[]): CPLPrice[] {
+  return rows.map(row => ({ month: row.month, price: row.cplPciPrice }));
+}
+
+function shiftMonthKey(month: string, delta: number): string {
+  const [y, m] = month.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1 + delta, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
 function resolveApiErrorMessage(primary: unknown, secondary: unknown, fallback: string): string {
@@ -417,24 +449,43 @@ async function loadForecastPriceData(
   endMonth: string,
   version: string,
   signal: AbortSignal,
-): Promise<{ cpl: CPLPrice[]; naphtha: CPLPrice[]; benzene: CPLPrice[] }> {
+): Promise<{
+  cpl: CPLPrice[];
+  naphtha: CPLPrice[];
+  benzene: CPLPrice[];
+  jpy: CPLPrice[];
+  thb: CPLPrice[];
+  tecnon: CPLPrice[];
+  pci: CPLPrice[];
+}> {
+  // Polymer policies may look back CPL-Q (~6 months) / CPL-2 — pad the range.
+  const paddedStart = shiftMonthKey(startMonth, -6);
   try {
-    const result = await api.priceManagement.listRange(startMonth, endMonth, version, signal);
+    const result = await api.priceManagement.listRange(paddedStart, endMonth, version, signal);
     return {
       cpl: priceRowsToCplPrices(result.rows),
       naphtha: priceRowsToNaphthaPrices(result.rows),
       benzene: priceRowsToBenzenePrices(result.rows),
+      jpy: priceRowsToJpyRates(result.rows),
+      thb: priceRowsToThbRates(result.rows),
+      tecnon: priceRowsToTecnonPrices(result.rows),
+      pci: priceRowsToPciPrices(result.rows),
     };
   } catch (primaryError) {
     try {
       const legacyPrices = await api.cpl.list();
       const cplFallback = legacyPrices
-        .filter(price => price.month >= startMonth && price.month <= endMonth)
+        .filter(price => price.month >= paddedStart && price.month <= endMonth)
         .sort((a, b) => a.month.localeCompare(b.month));
+      const zero = cplFallback.map(price => ({ month: price.month, price: 0 }));
       return {
         cpl: cplFallback,
-        naphtha: cplFallback.map(price => ({ month: price.month, price: 0 })),
-        benzene: cplFallback.map(price => ({ month: price.month, price: 0 })),
+        naphtha: zero,
+        benzene: zero,
+        jpy: zero,
+        thb: zero,
+        tecnon: zero,
+        pci: zero,
       };
     } catch (secondaryError) {
       throw new Error(resolveApiErrorMessage(primaryError, secondaryError, 'Failed to load forecast prices'));
@@ -622,6 +673,12 @@ export default function App() {
   const [cplPrices, setCplPrices] = useState<CPLPrice[]>([]);
   const [naphthaprices, setNaphthaprices] = useState<CPLPrice[]>([]);
   const [benzeneprices, setBenzeneprices] = useState<CPLPrice[]>([]);
+  const [jpyRates, setJpyRates] = useState<CPLPrice[]>([]);
+  const [thbRates, setThbRates] = useState<CPLPrice[]>([]);
+  const [tecnonPrices, setTecnonPrices] = useState<CPLPrice[]>([]);
+  const [pciPrices, setPciPrices] = useState<CPLPrice[]>([]);
+  const [latestActualPriceMap, setLatestActualPriceMap] = useState<Map<string, number>>(new Map());
+  const [pricingPolicyMap, setPricingPolicyMap] = useState<Map<string, string | null>>(new Map());
   const [versions, setVersions] = useState<string[]>([CURRENT_FORECAST_VERSION]);
   const [selectedVersion, setSelectedVersion] = useState(CURRENT_FORECAST_VERSION);
   const [stampPeriod, setStampPeriod] = useState('No');
@@ -660,6 +717,30 @@ export default function App() {
       setAppError(null);
     } catch (error) {
       setAppError(error instanceof ApiError ? error.message : 'Failed to save spread');
+    }
+  }, [authUser?.email, authUser?.name]);
+  const handlePricingPolicyChange = useCallback(async (regId: string, pricingPolicy: string | null) => {
+    setPricingPolicyMap(prev => {
+      const next = new Map(prev);
+      next.set(regId, pricingPolicy);
+      return next;
+    });
+    const committedBy = authUser?.name || authUser?.email || 'sales-forecast-web';
+    try {
+      await api.registrations.updatePriceSettings(regId, { pricingPolicy }, committedBy);
+      setRegistrations(previous =>
+        previous.map(registration =>
+          registration.id === regId ? { ...registration, pricingPolicy } : registration
+        )
+      );
+      setManagedRegistrations(previous =>
+        previous.map(registration =>
+          registration.id === regId ? { ...registration, pricingPolicy } : registration
+        )
+      );
+      setAppError(null);
+    } catch (error) {
+      setAppError(error instanceof ApiError ? error.message : 'Failed to save pricing policy');
     }
   }, [authUser?.email, authUser?.name]);
   const handleCustomColumnValueChange = useCallback(async (
@@ -1121,8 +1202,46 @@ export default function App() {
     [serverRegistrationFilters]
   );
 
+  // Content-stable key so Set/callback identity does NOT churn when
+  // registrations is replaced with an equivalent list (prevents reload loops).
+  const policyDrivenRegistrationKey = useMemo(() => {
+    const ids: string[] = [];
+    for (const registration of registrations) {
+      const isPolymer = String(registration.businessUnit ?? '').toLowerCase() === 'polymer';
+      if (!isPolymer) continue;
+      const policy = normalizePricingPolicy(
+        pricingPolicyMap.has(registration.id)
+          ? pricingPolicyMap.get(registration.id)
+          : registration.pricingPolicy
+      );
+      const spread = spreadMap.has(registration.id)
+        ? spreadMap.get(registration.id)
+        : registration.spread;
+      if (policy || isCostPlus5Spread(spread)) ids.push(registration.id);
+    }
+    ids.sort();
+    return ids.join('\0');
+  }, [pricingPolicyMap, registrations, spreadMap]);
+
+  const policyDrivenRegistrationIds = useMemo(
+    () => new Set(policyDrivenRegistrationKey ? policyDrivenRegistrationKey.split('\0') : []),
+    [policyDrivenRegistrationKey],
+  );
+
+  const polymerRegistrationIdsKey = useMemo(() => {
+    return registrations
+      .filter(registration => String(registration.businessUnit ?? '').toLowerCase() === 'polymer')
+      .map(registration => registration.id)
+      .filter(Boolean)
+      .sort()
+      .join('\0');
+  }, [registrations]);
+
   const applyPriceStateFromForecasts = useCallback((forecasts: ForecastValue[]) => {
-    const { fixedPrices, formulas } = seedPriceStateFromForecasts(forecasts);
+    const { fixedPrices, formulas } = seedPriceStateFromForecasts(
+      forecasts,
+      policyDrivenRegistrationIds,
+    );
     if (fixedPrices.size > 0) {
       setFixedPriceMap(previous => {
         const next = new Map(previous);
@@ -1145,7 +1264,7 @@ export default function App() {
         return next;
       });
     }
-  }, []);
+  }, [policyDrivenRegistrationIds]);
 
   const mergeForecastChunk = useCallback((
     forecasts: ForecastValue[],
@@ -1534,7 +1653,10 @@ export default function App() {
       return Array.from(next.values());
     });
 
-    const { fixedPrices, formulas } = seedPriceStateFromForecasts(forecasts);
+    const { fixedPrices, formulas } = seedPriceStateFromForecasts(
+      forecasts,
+      policyDrivenRegistrationIds,
+    );
     if (fixedPrices.size > 0) {
       setFixedPriceMap(previous => {
         const next = new Map(previous);
@@ -1557,7 +1679,7 @@ export default function App() {
         return next;
       });
     }
-  }, []);
+  }, [policyDrivenRegistrationIds]);
 
   const mergeActualsIntoForecastState = useCallback((
     acts: ActualValue[],
@@ -1745,6 +1867,26 @@ export default function App() {
     };
   }, [manageRegistrationOpen]);
 
+  // Keep latest callbacks in refs so data-loading effects do NOT re-run when
+  // callback identities churn (this previously caused an infinite reload loop
+  // that flooded the API and exhausted the DB connection pool).
+  const loadAllForecastVersionsRef = useRef(loadAllForecastVersions);
+  useEffect(() => {
+    loadAllForecastVersionsRef.current = loadAllForecastVersions;
+  }, [loadAllForecastVersions]);
+  const mergeLoadedForecastDataRef = useRef(mergeLoadedForecastData);
+  useEffect(() => {
+    mergeLoadedForecastDataRef.current = mergeLoadedForecastData;
+  }, [mergeLoadedForecastData]);
+  const loadInventoryForRegistrationsRef = useRef(loadInventoryForRegistrations);
+  useEffect(() => {
+    loadInventoryForRegistrationsRef.current = loadInventoryForRegistrations;
+  }, [loadInventoryForRegistrations]);
+  const abortForecastBackgroundLoadRef = useRef(abortForecastBackgroundLoad);
+  useEffect(() => {
+    abortForecastBackgroundLoadRef.current = abortForecastBackgroundLoad;
+  }, [abortForecastBackgroundLoad]);
+
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
@@ -1812,34 +1954,36 @@ export default function App() {
 
         const registrationIds = allRegistrations.map(reg => reg.id);
         if (registrationIds.length === 0) return;
-        ignorePromise(loadInventoryForRegistrations(allRegistrations, controller.signal));
+        ignorePromise(loadInventoryForRegistrationsRef.current(allRegistrations, controller.signal));
 
         setIsTableDataLoading(true);
         const versionForInitialLoad = selectedVersionRef.current;
+        const rangeForInitialLoad = dateRangeRef.current;
+        const modeForInitialLoad = forecastModeRef.current;
         const actualsPromise = api.actuals.list(
-          dateRange.start.slice(0, 7),
-          dateRange.end.slice(0, 7),
+          rangeForInitialLoad.start.slice(0, 7),
+          rangeForInitialLoad.end.slice(0, 7),
           registrationIds,
           serverRegistrationFiltersRef.current,
-          forecastMode,
+          modeForInitialLoad,
           controller.signal
         );
-        await loadAllForecastVersions({
+        await loadAllForecastVersionsRef.current({
           registrationIds,
-          dateRange,
-          forecastMode,
+          dateRange: rangeForInitialLoad,
+          forecastMode: modeForInitialLoad,
           versionsToLoad: allVers,
           activeVersion: versionForInitialLoad,
           signal: controller.signal,
           priorityRegistrationIds: buildForecastPriorityIds(registrationIds, registrationIds),
-          filterKey: serverRegistrationFilterKey,
+          filterKey: JSON.stringify(serverRegistrationFiltersRef.current),
           waitForPriorityOnly: true,
         });
         setIsTableDataLoading(false);
         setForecastLoadProgress(null);
         const actuals = await actualsPromise;
         if (!cancelled && generation === registrationLoadGenerationRef.current) {
-          mergeLoadedForecastData([], actuals, allVers);
+          mergeLoadedForecastDataRef.current([], actuals, allVers);
           initialForecastLoadCompleteRef.current = true;
           setInitialForecastLoadComplete(true);
           hasSkippedInitialForecastScopeRefreshRef.current = true;
@@ -1864,7 +2008,11 @@ export default function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [loadAllForecastVersions, loadInventoryForRegistrations, mergeLoadedForecastData]);
+    // Initial mount load only. Re-loads triggered by filters/date/version are
+    // handled by the dedicated effect below; depending on callback identities
+    // here caused an infinite reload loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (activeTab !== 'master') return;
@@ -1911,6 +2059,10 @@ export default function App() {
         setCplPrices(prices.cpl);
         setNaphthaprices(prices.naphtha);
         setBenzeneprices(prices.benzene);
+        setJpyRates(prices.jpy);
+        setThbRates(prices.thb);
+        setTecnonPrices(prices.tecnon);
+        setPciPrices(prices.pci);
       } catch (error) {
         if (!cancelled && !controller.signal.aborted) {
           setAppError(error instanceof Error ? error.message : 'Failed to load forecast prices');
@@ -1923,6 +2075,51 @@ export default function App() {
       controller.abort();
     };
   }, [dateRange.end, dateRange.start, selectedVersion]);
+
+  // Seed pricingPolicyMap from loaded registrations (Polymer policies).
+  useEffect(() => {
+    setPricingPolicyMap(previous => {
+      const next = new Map(previous);
+      let changed = false;
+      for (const registration of registrations) {
+        if (next.has(registration.id)) continue;
+        if (registration.pricingPolicy == null || registration.pricingPolicy === '') continue;
+        next.set(registration.id, registration.pricingPolicy);
+        changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [registrations]);
+
+  // Latest Actual prices for Cost+5% Polymer pricing.
+  useEffect(() => {
+    const polymerIds = polymerRegistrationIdsKey
+      ? polymerRegistrationIdsKey.split('\0')
+      : [];
+    if (polymerIds.length === 0) {
+      setLatestActualPriceMap(new Map());
+      return;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+    ignorePromise((async () => {
+      try {
+        const rows = await api.actuals.latestPrice(polymerIds, controller.signal);
+        if (cancelled) return;
+        setLatestActualPriceMap(new Map(rows.map(row => [row.registrationId, row.price])));
+      } catch (error) {
+        if (!cancelled && !controller.signal.aborted) {
+          console.warn('[actuals] latest-price failed:', error);
+        }
+      }
+    })());
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [polymerRegistrationIdsKey]);
 
   const loadMoreRegistrations = useCallback(async () => {
     if (isLoadingMoreRef.current || !hasMoreRegistrations || !registrationCursor) return;
@@ -2034,7 +2231,7 @@ export default function App() {
     registrationLoadGenerationRef.current = generation;
     loadedCustomValueRegistrationIdsRef.current.clear();
     loadMoreAbortRef.current?.abort();
-    abortForecastBackgroundLoad();
+    abortForecastBackgroundLoadRef.current();
     isLoadingMoreRef.current = false;
     setIsLoadingMore(false);
     setIsTableDataLoading(true);
@@ -2043,6 +2240,14 @@ export default function App() {
     setRegistrationCursor(null);
     setHasMoreRegistrations(false);
 
+    const filters = serverRegistrationFiltersRef.current;
+    const range = dateRangeRef.current;
+    const mode = forecastModeRef.current;
+    const version = selectedVersionRef.current;
+    const activeVersions = versionsRef.current.length > 0
+      ? versionsRef.current
+      : ['Current Forecast'];
+
     let cancelled = false;
     const controller = new AbortController();
     async function loadFilteredRegistrations() {
@@ -2050,7 +2255,7 @@ export default function App() {
         const registrationPage = await api.registrations.page(
           null,
           REGISTRATION_PAGE_SIZE,
-          serverRegistrationFilters,
+          filters,
           controller.signal,
         );
         if (cancelled || generation !== registrationLoadGenerationRef.current) return;
@@ -2058,26 +2263,25 @@ export default function App() {
         setRegistrations(registrationPage.items);
         setRegistrationCursor(registrationPage.nextCursor);
         setHasMoreRegistrations(registrationPage.hasMore);
-        ignorePromise(loadInventoryForRegistrations(registrationPage.items, controller.signal));
+        ignorePromise(loadInventoryForRegistrationsRef.current(registrationPage.items, controller.signal));
 
         const registrationIds = registrationPage.items.map(reg => reg.id);
         if (registrationIds.length === 0) return;
 
-        const activeVersions = versions.length > 0 ? versions : ['Current Forecast'];
         const actualsPromise = api.actuals.list(
-          dateRange.start.slice(0, 7),
-          dateRange.end.slice(0, 7),
+          range.start.slice(0, 7),
+          range.end.slice(0, 7),
           registrationIds,
-          serverRegistrationFilters,
-          forecastMode,
+          filters,
+          mode,
           controller.signal
         );
-        await loadAllForecastVersions({
+        await loadAllForecastVersionsRef.current({
           registrationIds,
-          dateRange,
-          forecastMode,
+          dateRange: range,
+          forecastMode: mode,
           versionsToLoad: activeVersions,
-          activeVersion: selectedVersion,
+          activeVersion: version,
           signal: controller.signal,
           priorityRegistrationIds: buildForecastPriorityIds(registrationIds, registrationIds),
           filterKey: serverRegistrationFilterKey,
@@ -2091,7 +2295,7 @@ export default function App() {
           !controller.signal.aborted &&
           generation === registrationLoadGenerationRef.current
         ) {
-          mergeLoadedForecastData([], actuals, activeVersions);
+          mergeLoadedForecastDataRef.current([], actuals, activeVersions);
         }
       } catch (error) {
         if (!cancelled && generation === registrationLoadGenerationRef.current) {
@@ -2112,7 +2316,13 @@ export default function App() {
       controller.abort();
       setForecastLoadProgress(null);
     };
-  }, [serverRegistrationFilterKey, abortForecastBackgroundLoad, loadAllForecastVersions, mergeLoadedForecastData, versions, dateRange, forecastMode, selectedVersion, serverRegistrationFilters, loadInventoryForRegistrations]);
+  }, [
+    serverRegistrationFilterKey,
+    dateRange.start,
+    dateRange.end,
+    forecastMode,
+    selectedVersion,
+  ]);
 
   useEffect(() => {
     if (!hasSkippedInitialActualRefreshRef.current) {
@@ -2768,6 +2978,7 @@ export default function App() {
         carryOutLoading: 0,
         priceFormula: 'CPL',
         spread: null,
+        pricingPolicy: null,
       };
       const materialKey = `${fallbackRegistration.plantCode}|${fallbackRegistration.materialCode}`;
       return {
@@ -3317,6 +3528,10 @@ export default function App() {
         cpl: new Map<string, number>(cplPrices.map(price => [price.month, price.price])),
         naphtha: new Map<string, number>(naphthaprices.map(price => [price.month, price.price])),
         benzene: new Map<string, number>(benzeneprices.map(price => [price.month, price.price])),
+        jpy: new Map<string, number>(jpyRates.map(price => [price.month, price.price])),
+        thb: new Map<string, number>(thbRates.map(price => [price.month, price.price])),
+        tecnon: new Map<string, number>(tecnonPrices.map(price => [price.month, price.price])),
+        pci: new Map<string, number>(pciPrices.map(price => [price.month, price.price])),
       };
       const data = displayedRegistrations.map(reg => {
         const row: Record<string, unknown> = { ...reg };
@@ -3339,6 +3554,8 @@ export default function App() {
             fixedPriceMap,
             exportPriceMaps,
             spreadMap,
+            pricingPolicyMap,
+            latestActualPriceMap,
           );
           row[m] = value;
         });
@@ -3373,7 +3590,17 @@ export default function App() {
       const exists = previous.some(row => row.month === month);
       const nextRows = exists
         ? previous.map(row => row.month === month ? { ...row, [field]: value } : row)
-        : [...previous, { month, cplPrice: 0, naphthaPrice: 0, benzenePrice: 0, [field]: value }];
+        : [...previous, {
+            month,
+            cplPrice: 0,
+            naphthaPrice: 0,
+            benzenePrice: 0,
+            jpyUsdRate: 0,
+            thbUsdRate: 0,
+            cplTecnonPrice: 0,
+            cplPciPrice: 0,
+            [field]: value,
+          }];
       return nextRows.sort((a, b) => a.month.localeCompare(b.month));
     });
   }, []);
@@ -3391,6 +3618,10 @@ export default function App() {
         setCplPrices(priceRowsToCplPrices(priceManagementRows));
         setNaphthaprices(priceRowsToNaphthaPrices(priceManagementRows));
         setBenzeneprices(priceRowsToBenzenePrices(priceManagementRows));
+        setJpyRates(priceRowsToJpyRates(priceManagementRows));
+        setThbRates(priceRowsToThbRates(priceManagementRows));
+        setTecnonPrices(priceRowsToTecnonPrices(priceManagementRows));
+        setPciPrices(priceRowsToPciPrices(priceManagementRows));
       }
       setAppError(null);
     } catch (error) {
@@ -3529,12 +3760,15 @@ export default function App() {
                 }}
               />
             </NavDropdown>
-            <button 
-              onClick={() => { flash(); setOpenNavMenu(null); setActiveTab('dashboard'); }}
-              className={cn(
-                "flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-black uppercase tracking-wider transition-all",
-                activeTab === 'dashboard' ? "bg-white text-[#007ABE] shadow-sm" : "text-blue-50 hover:bg-white/10 hover:text-white"
-              )}
+            <button
+              onClick={() => {
+                flash();
+                setOpenNavMenu(null);
+                // Open the Power BI analytics report in a new tab; keep the
+                // current page unchanged.
+                window.open(ANALYTICS_POWER_BI_URL, '_blank', 'noopener,noreferrer');
+              }}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[10px] font-black uppercase tracking-wider transition-all text-blue-50 hover:bg-white/10 hover:text-white"
             >
               <BarChart3 size={14} />
               Analytics
@@ -4203,6 +4437,8 @@ export default function App() {
                   planningView={planningView}
                   formulaMap={formulaMap}
                   onFormulaChange={handleFormulaChange}
+                  pricingPolicyMap={pricingPolicyMap}
+                  onPricingPolicyChange={handlePricingPolicyChange}
                   spreadMap={spreadMap}
                   onSpreadChange={handleSpreadChange}
                   onSpreadCommit={handleSpreadCommit}
@@ -4210,6 +4446,11 @@ export default function App() {
                   onFormulaFilterChange={setFormulaFilter}
                   naphthaprices={naphthaprices}
                   benzeneprices={benzeneprices}
+                  jpyRates={jpyRates}
+                  thbRates={thbRates}
+                  tecnonPrices={tecnonPrices}
+                  pciPrices={pciPrices}
+                  latestActualPriceMap={latestActualPriceMap}
                   fixedPriceMap={fixedPriceMap}
                   onFixedPriceChange={handleFixedPriceChange}
                   onAmountChange={handleAmountChange}
@@ -4317,22 +4558,26 @@ export default function App() {
                 className="flex-1 flex flex-col overflow-hidden"
               >
                 <div ref={cplTableRef} className="flex-1 overflow-auto">
-                  <table className="w-full border-collapse table-fixed min-w-[980px]">
+                  <table className="w-full border-collapse table-fixed min-w-[1680px]">
                     <thead className="sticky top-0 z-20 bg-slate-100">
                       <tr className="divide-x divide-slate-200">
-                        <th className="w-[12%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-left">Month</th>
-                        <th className="w-[18%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-left">Period Description</th>
-                        <th className="w-[20%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">CPL (USD/Ton)</th>
-                        <th className="w-[20%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">Naphtha (USD/Ton)</th>
-                        <th className="w-[22%] px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">Benzene (USD/Ton)</th>
+                        <th className="w-[8%] px-3 py-3 text-[10px] font-black uppercase text-slate-400 text-left">Month</th>
+                        <th className="w-[10%] px-3 py-3 text-[10px] font-black uppercase text-slate-400 text-left">Period Description</th>
+                        <th className="w-[12%] px-3 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">CPL CCF (USD/Ton)</th>
+                        <th className="w-[11%] px-3 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">Naphtha (USD/Ton)</th>
+                        <th className="w-[11%] px-3 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">Benzene (USD/Ton)</th>
+                        <th className="w-[10%] px-3 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">JPY/USD</th>
+                        <th className="w-[10%] px-3 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">THB/USD</th>
+                        <th className="w-[14%] px-3 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">CPL Tecnon (USD/Ton)</th>
+                        <th className="w-[14%] px-3 py-3 text-[10px] font-black uppercase text-slate-400 text-right tracking-widest">CPL PCI (USD/Ton)</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-xs font-semibold">
                       {filteredCplPrices.map(cpl => (
                         <tr key={cpl.month} className="divide-x divide-slate-50 hover:bg-slate-50/50 transition group">
-                          <td className="px-4 py-3 font-mono text-slate-400 uppercase group-hover:text-blue-600 transition-colors">{cpl.month}</td>
-                          <td className="px-4 py-3 text-slate-700 font-bold">{format(parseISO(cpl.month + '-01'), 'MMMM yyyy')}</td>
-                          <td className="px-4 py-3 bg-blue-50/10">
+                          <td className="px-3 py-3 font-mono text-slate-400 uppercase group-hover:text-blue-600 transition-colors">{cpl.month}</td>
+                          <td className="px-3 py-3 text-slate-700 font-bold">{format(parseISO(cpl.month + '-01'), 'MMMM yyyy')}</td>
+                          <td className="px-3 py-3 bg-blue-50/10">
                             <div className="flex items-center justify-end gap-1.5">
                               <span className="text-slate-300">$</span>
                               <input
@@ -4344,11 +4589,11 @@ export default function App() {
                                   const val = Number(e.target.value);
                                   updatePriceManagementCell(cpl.month, 'cplPrice', val);
                                 }}
-                                className="bg-white border border-slate-200 group-hover:border-blue-400 rounded-md px-3 py-1.5 font-mono font-bold text-base text-right w-32 focus:ring-2 focus:ring-blue-100 outline-none transition-all shadow-sm"
+                                className="bg-white border border-slate-200 group-hover:border-blue-400 rounded-md px-2 py-1.5 font-mono font-bold text-sm text-right w-28 focus:ring-2 focus:ring-blue-100 outline-none transition-all shadow-sm"
                               />
                             </div>
                           </td>
-                          <td className="px-4 py-3 bg-amber-50/10">
+                          <td className="px-3 py-3 bg-amber-50/10">
                             <div className="flex items-center justify-end gap-1.5">
                               <span className="text-slate-300">$</span>
                               <input
@@ -4360,11 +4605,11 @@ export default function App() {
                                   const val = Number(e.target.value);
                                   updatePriceManagementCell(cpl.month, 'naphthaPrice', val);
                                 }}
-                                className="bg-white border border-slate-200 group-hover:border-amber-400 rounded-md px-3 py-1.5 font-mono font-bold text-base text-right w-32 focus:ring-2 focus:ring-amber-100 outline-none transition-all shadow-sm"
+                                className="bg-white border border-slate-200 group-hover:border-amber-400 rounded-md px-2 py-1.5 font-mono font-bold text-sm text-right w-28 focus:ring-2 focus:ring-amber-100 outline-none transition-all shadow-sm"
                               />
                             </div>
                           </td>
-                          <td className="px-4 py-3 bg-emerald-50/10">
+                          <td className="px-3 py-3 bg-emerald-50/10">
                             <div className="flex items-center justify-end gap-1.5">
                               <span className="text-slate-300">$</span>
                               <input
@@ -4376,7 +4621,73 @@ export default function App() {
                                   const val = Number(e.target.value);
                                   updatePriceManagementCell(cpl.month, 'benzenePrice', val);
                                 }}
-                                className="bg-white border border-slate-200 group-hover:border-emerald-400 rounded-md px-3 py-1.5 font-mono font-bold text-base text-right w-32 focus:ring-2 focus:ring-emerald-100 outline-none transition-all shadow-sm"
+                                className="bg-white border border-slate-200 group-hover:border-emerald-400 rounded-md px-2 py-1.5 font-mono font-bold text-sm text-right w-28 focus:ring-2 focus:ring-emerald-100 outline-none transition-all shadow-sm"
+                              />
+                            </div>
+                          </td>
+                          <td className="px-3 py-3 bg-violet-50/10">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <input
+                                type="number"
+                                value={priceManagementRows.find(r => r.month === cpl.month)?.jpyUsdRate ?? 0}
+                                onFocus={selectZeroPriceInput}
+                                onMouseUp={keepZeroPriceSelected}
+                                onChange={e => {
+                                  const val = Number(e.target.value);
+                                  updatePriceManagementCell(cpl.month, 'jpyUsdRate', val);
+                                }}
+                                className="bg-white border border-slate-200 group-hover:border-violet-400 rounded-md px-2 py-1.5 font-mono font-bold text-sm text-right w-28 focus:ring-2 focus:ring-violet-100 outline-none transition-all shadow-sm"
+                                title="JPY per 1 USD"
+                              />
+                            </div>
+                          </td>
+                          <td className="px-3 py-3 bg-rose-50/10">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <input
+                                type="number"
+                                value={priceManagementRows.find(r => r.month === cpl.month)?.thbUsdRate ?? 0}
+                                onFocus={selectZeroPriceInput}
+                                onMouseUp={keepZeroPriceSelected}
+                                onChange={e => {
+                                  const val = Number(e.target.value);
+                                  updatePriceManagementCell(cpl.month, 'thbUsdRate', val);
+                                }}
+                                className="bg-white border border-slate-200 group-hover:border-rose-400 rounded-md px-2 py-1.5 font-mono font-bold text-sm text-right w-28 focus:ring-2 focus:ring-rose-100 outline-none transition-all shadow-sm"
+                                title="THB per 1 USD"
+                              />
+                            </div>
+                          </td>
+                          <td className="px-3 py-3 bg-cyan-50/10">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <span className="text-slate-300">$</span>
+                              <input
+                                type="number"
+                                value={priceManagementRows.find(r => r.month === cpl.month)?.cplTecnonPrice ?? 0}
+                                onFocus={selectZeroPriceInput}
+                                onMouseUp={keepZeroPriceSelected}
+                                onChange={e => {
+                                  const val = Number(e.target.value);
+                                  updatePriceManagementCell(cpl.month, 'cplTecnonPrice', val);
+                                }}
+                                className="bg-white border border-slate-200 group-hover:border-cyan-400 rounded-md px-2 py-1.5 font-mono font-bold text-sm text-right w-28 focus:ring-2 focus:ring-cyan-100 outline-none transition-all shadow-sm"
+                                title="CPL Tecnon TW Domestic"
+                              />
+                            </div>
+                          </td>
+                          <td className="px-3 py-3 bg-orange-50/10">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <span className="text-slate-300">$</span>
+                              <input
+                                type="number"
+                                value={priceManagementRows.find(r => r.month === cpl.month)?.cplPciPrice ?? 0}
+                                onFocus={selectZeroPriceInput}
+                                onMouseUp={keepZeroPriceSelected}
+                                onChange={e => {
+                                  const val = Number(e.target.value);
+                                  updatePriceManagementCell(cpl.month, 'cplPciPrice', val);
+                                }}
+                                className="bg-white border border-slate-200 group-hover:border-orange-400 rounded-md px-2 py-1.5 font-mono font-bold text-sm text-right w-28 focus:ring-2 focus:ring-orange-100 outline-none transition-all shadow-sm"
+                                title="CPL PCI"
                               />
                             </div>
                           </td>
@@ -4384,7 +4695,7 @@ export default function App() {
                       ))}
                       {filteredCplPrices.length === 0 && (
                         <tr>
-                          <td colSpan={5} className="p-12 text-center">
+                          <td colSpan={9} className="p-12 text-center">
                             <div className="flex flex-col items-center gap-2 opacity-30">
                               <Calendar size={48} />
                               <p className="font-bold uppercase tracking-widest text-xs">No data for FY {String(selectedFy).slice(-2)}</p>
@@ -4496,6 +4807,10 @@ export default function App() {
                 setCplPrices(priceRowsToCplPrices(result.rows));
                 setNaphthaprices(priceRowsToNaphthaPrices(result.rows));
                 setBenzeneprices(priceRowsToBenzenePrices(result.rows));
+                setJpyRates(priceRowsToJpyRates(result.rows));
+                setThbRates(priceRowsToThbRates(result.rows));
+                setTecnonPrices(priceRowsToTecnonPrices(result.rows));
+                setPciPrices(priceRowsToPciPrices(result.rows));
               }
               setIsCopyingPriceVersion(false);
               setAppError(null);
@@ -4935,7 +5250,7 @@ function CopyPriceVersionModal({
 
           <div className="rounded-lg border border-amber-100 bg-amber-50/60 px-3.5 py-3">
             <p className="text-xs leading-relaxed text-amber-900/80">
-              This replaces CPL, Naphtha, and Benzene prices for every month in FY {String(fy).slice(-2)} in <span className="font-semibold">{targetVersion}</span>.
+              This replaces CPL, Naphtha, Benzene, FX, Tecnon, and PCI prices for every month in FY {String(fy).slice(-2)} in <span className="font-semibold">{targetVersion}</span>.
             </p>
           </div>
         </div>

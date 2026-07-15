@@ -8,6 +8,7 @@ import {
   buildExtendedForecastColumns,
   buildSyntheticImportKey,
   findHeaderIndex,
+  findPricingPolicyColumnIndex,
   findSpreadColumnIndex,
   firstDayOfMonthPeriod,
   firstValue,
@@ -19,6 +20,7 @@ import {
   normalizeKey,
   parseForecastMonthColumn,
   parseForecastNumber,
+  parsePricingPolicyCell,
   parseSpreadCell,
   recomputeAggregatedPrices,
   registrationTopicFromImportKey,
@@ -62,6 +64,7 @@ function mergeExcelGroups(existing: ExcelForecastGroup, incoming: ExcelForecastG
   existing.materialDescription = existing.materialDescription ?? incoming.materialDescription;
   existing.registrationTopic = existing.registrationTopic ?? incoming.registrationTopic;
   existing.spread = existing.spread ?? incoming.spread;
+  existing.pricingPolicy = existing.pricingPolicy ?? incoming.pricingPolicy;
 }
 
 export type VersionedSheetParseResult = {
@@ -179,6 +182,7 @@ function emptyExcelGroup(key: string, forecastColumns: VersionedForecastColumn[]
     priceValues: forecastColumns.map(() => 0),
     amountValues: forecastColumns.map(() => 0),
     spread: null,
+    pricingPolicy: null,
     hasInvalidNumber: false,
   };
 }
@@ -203,6 +207,7 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
   const metadataColumns = resolveImportMetadataColumns(header);
   const spreadColumnIndex = findSpreadColumnIndex(header);
   const spreadHeader = spreadColumnIndex >= 0 ? normalizeHeader(header[spreadColumnIndex]) : '';
+  const pricingPolicyColumnIndex = findPricingPolicyColumnIndex(header);
 
   if (!isImportKeyHeader(header[0])) {
     headerErrors.push({
@@ -313,6 +318,12 @@ export function parseVersionedImportSheet(sheetName: string, sheet: XLSX.WorkShe
         } else {
           group.spread = spreadParsed.value;
         }
+      }
+    }
+    if (pricingPolicyColumnIndex >= 0 && group.pricingPolicy === null) {
+      const policyParsed = parsePricingPolicyCell(row[pricingPolicyColumnIndex]);
+      if (policyParsed.ok) {
+        group.pricingPolicy = policyParsed.value;
       }
     }
 

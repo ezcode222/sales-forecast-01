@@ -147,6 +147,7 @@ export type ExcelForecastGroup = {
   priceValues: number[];
   amountValues: number[];
   spread: string | null;
+  pricingPolicy: string | null;
   hasInvalidNumber: boolean;
 };
 
@@ -226,6 +227,7 @@ export type AutoCreateRegistrationPackage = {
   gradeSap: string | null;
   registrationTopic: string | null;
   spread: string | null;
+  pricingPolicy: string | null;
   hasImportedPrice: boolean;
   pendingForecastRecords: PendingImportForecastRecord[];
 };
