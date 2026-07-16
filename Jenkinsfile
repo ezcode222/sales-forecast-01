@@ -122,7 +122,7 @@ pipeline {
       when {
         expression {
           def branchName = env.BRANCH_NAME ?: env.GIT_BRANCH?.tokenize('/')?.last()
-          branchName == 'master'
+          branchName == 'main' || branchName == 'master'
         }
       }
       steps {
@@ -143,7 +143,7 @@ pipeline {
       when {
         expression {
           def branchName = env.BRANCH_NAME ?: env.GIT_BRANCH?.tokenize('/')?.last()
-          branchName == 'master'
+          branchName == 'main' || branchName == 'master'
         }
       }
       steps {

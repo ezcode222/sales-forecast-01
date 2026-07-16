@@ -67,8 +67,15 @@ export function getAppPath(req?: Request, mode?: AppMode) {
   const basePath = normalizeBasePath();
   const resolvedMode = mode ?? resolveReturnMode(req);
   const publicMode = toPublicAppMode(resolvedMode);
-  const path = basePath || '/';
+  // Keep a trailing slash before ? so Vite base (/ugt-sales-forecast/) and
+  // Keycloak Root/Home URLs resolve assets correctly after SSO.
+  const path = basePath ? `${basePath}/` : '/';
   return `${path}?mode=${publicMode}`;
+}
+
+/** Absolute post-login / post-logout URL (required behind reverse proxies). */
+export function getAbsoluteAppUrl(req?: Request, mode?: AppMode) {
+  return `${getPublicBaseUrl(req)}${getAppPath(req, mode)}`;
 }
 
 function isDevAuthBypass() {
@@ -389,7 +396,7 @@ function getCallbackUrl(req?: Request) {
 }
 
 function getPostLogoutUrl(req?: Request) {
-  return `${getPublicBaseUrl(req)}${getAppPath(req)}`;
+  return getAbsoluteAppUrl(req);
 }
 
 function renderLoginPage(message?: string, authStartPath = `${normalizeBasePath()}/auth/start?mode=nylon`) {
@@ -791,7 +798,7 @@ export function createAuthRouter() {
       const sessionId = crypto.randomUUID();
       sessions.set(sessionId, { user: getDevUser() });
       setSessionCookie(res, sessionId);
-      return res.redirect(getAppPath(req, returnMode));
+      return res.redirect(getAbsoluteAppUrl(req, returnMode));
     }
 
     try {
@@ -848,7 +855,7 @@ export function createAuthRouter() {
       sessions.set(sessionId, session);
       setSessionCookie(res, sessionId);
       const returnMode: AppMode = savedState.returnMode === 'ufa' ? 'ufa' : 'nyl';
-      res.redirect(getAppPath(undefined, returnMode));
+      res.redirect(getAbsoluteAppUrl(req, returnMode));
     } catch (error) {
       console.error('[auth] callback failed:', error);
       res.status(401).type('html').send(

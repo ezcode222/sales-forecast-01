@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import type { Request, Response } from 'express';
 import path from 'node:path';
 import registrationsRouter from './api/routes/registrations';
 import forecastRouter from './api/routes/forecast';
@@ -21,7 +22,7 @@ import { ensureHrEmployeeCache } from './api/services/employeeEmail';
 import { ensureCustomerMasterCache } from './api/services/customerMaster';
 import { ensureCplActualPrices } from './api/services/cplActualSync';
 import { ensureRoleDefaults } from './api/services/appRoles';
-import { createAuthRouter, getAppPath, normalizeBasePath, requireAuth } from './api/auth';
+import { createAuthRouter, getAbsoluteAppUrl, normalizeBasePath, requireAuth } from './api/auth';
 import { appModeContext, sendAppConfig } from './api/middleware/appModeContext';
 import { DEFAULT_APP_BASE_PATH } from './config/appMode';
 
@@ -29,6 +30,11 @@ const app = express();
 const PORT = process.env.API_PORT || 3001;
 const basePath = normalizeBasePath(process.env.APP_BASE_PATH ?? DEFAULT_APP_BASE_PATH);
 const distPath = path.resolve(process.cwd(), 'dist');
+const indexHtmlPath = path.join(distPath, 'index.html');
+
+function sendSpa(_req: Request, res: Response) {
+  res.sendFile(indexHtmlPath);
+}
 
 // Behind the reverse proxy at ugtweb.ube.co.th: honor X-Forwarded-Proto/Host
 // so auth callback/redirect URLs use the real public host, not localhost.
@@ -81,20 +87,30 @@ if (process.env.NODE_ENV !== 'production') {
   app.use('/api', requireAuth, apiRouter);
 }
 
+// Old dual-deploy paths → single app with ?mode=
 if (basePath) {
-  app.use((req, res, next) => {
-    // Prefer URL without trailing slash: /ugt-sales-forecast/ -> /ugt-sales-forecast
-    if (req.path !== `${basePath}/`) return next();
-    const queryIndex = req.originalUrl.indexOf('?');
-    const query = queryIndex >= 0 ? req.originalUrl.slice(queryIndex) : '';
-    return res.redirect(308, `${basePath}${query}`);
-  });
+  for (const legacy of ['nylon', 'ufa'] as const) {
+    const legacyRoot = `${basePath}/${legacy}`;
+    app.get([legacyRoot, `${legacyRoot}/`, `${legacyRoot}/*`], (req, res) => {
+      res.redirect(302, getAbsoluteAppUrl(req, legacy === 'ufa' ? 'ufa' : 'nyl'));
+    });
+  }
 }
-app.use(basePath || '/', express.static(distPath));
-app.get('/', (req, res) => res.redirect(getAppPath(req)));
-app.get([basePath, `${basePath}/*`], (_req, res) => {
-  res.sendFile(path.join(distPath, 'index.html'));
-});
+
+// Serve the SPA under the base path. Never HTTP-redirect between slash/no-slash
+// variants — that fights nginx/Keycloak and causes ERR_TOO_MANY_REDIRECTS.
+app.get('/', (req, res) => res.redirect(302, getAbsoluteAppUrl(req)));
+if (basePath) {
+  app.get([basePath, `${basePath}/`], sendSpa);
+}
+app.use(
+  basePath || '/',
+  express.static(distPath, {
+    index: false,
+    redirect: false,
+  })
+);
+app.get([basePath || '/', `${basePath || ''}/*`], sendSpa);
 
 app.listen(PORT, () => {
   const publicUrl = process.env.APP_BASE_URL?.trim().replace(/\/+$/, '');

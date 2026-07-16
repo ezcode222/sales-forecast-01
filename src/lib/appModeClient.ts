@@ -42,8 +42,8 @@ export function resolveClientAppMode(search = typeof window !== 'undefined' ? wi
 }
 
 /**
- * Ensure the browser URL has a canonical ?mode=nylon|ufa without a navigation reload.
- * Returns the resolved internal mode.
+ * Ensure the browser URL has a canonical /ugt-sales-forecast/?mode=nylon|ufa
+ * (trailing slash before query — matches Vite base + Keycloak Root URL).
  */
 export function ensureCanonicalModeInUrl(): AppMode {
   if (typeof window === 'undefined') return 'nyl';
@@ -51,11 +51,14 @@ export function ensureCanonicalModeInUrl(): AppMode {
   const publicMode = toPublicAppMode(mode);
   const url = new URL(window.location.href);
   url.searchParams.set('mode', publicMode);
-  const canonicalPathname = url.pathname.length > 1
+  let pathname = url.pathname.length > 1
     ? url.pathname.replace(/\/+$/, '')
     : url.pathname;
-  const canonicalUrl = `${canonicalPathname}${url.search}${url.hash}`;
-  const currentUrl = `${url.pathname}${window.location.search}${url.hash}`;
+  if (pathname !== '/' && !pathname.endsWith('/')) {
+    pathname = `${pathname}/`;
+  }
+  const canonicalUrl = `${pathname}${url.search}${url.hash}`;
+  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (currentUrl !== canonicalUrl) {
     window.history.replaceState(window.history.state, '', canonicalUrl);
   }
@@ -70,7 +73,9 @@ export function navigateToAppMode(mode: AppMode) {
   storeAppMode(mode);
   const url = new URL(window.location.href);
   url.searchParams.set('mode', publicMode);
-  window.location.assign(`${url.pathname}${url.search}${url.hash}`);
+  let pathname = url.pathname.replace(/\/+$/, '') || '/';
+  if (pathname !== '/') pathname = `${pathname}/`;
+  window.location.assign(`${pathname}${url.search}${url.hash}`);
 }
 
 let activeClientAppMode: AppMode = typeof window !== 'undefined'
