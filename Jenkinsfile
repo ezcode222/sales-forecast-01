@@ -17,7 +17,6 @@ pipeline {
     APP_BASE_URL = 'https://ugtweb.ube.co.th'
     IMAGE_NAME = 'ugt-sales-forecast'
     CONTAINER_NAME = 'ugt-sales-forecast'
-    DATABASE_URL = 'sqlserver://127.0.0.1:1433;database=build;user=build;password=build;encrypt=true;trustServerCertificate=true'
   }
 
   stages {
@@ -67,6 +66,7 @@ pipeline {
               --out ./dc-report
               --suppression ./owasp-suppressions.xml
               --propertyfile dc-nvd.properties
+              --noupdate
             '''
           )
         }
@@ -89,8 +89,8 @@ pipeline {
         script {
           def branchName = env.BRANCH_NAME ?: env.GIT_BRANCH?.tokenize('/')?.last() ?: 'local'
           def safeBranch = branchName.replaceAll('[^A-Za-z0-9_.-]', '-')
-          def projectKey = branchName == 'main' ? 'ugt-sales-forecast' : "ugt-sales-forecast-${safeBranch}"
-          def projectName = branchName == 'main' ? 'UGT Sales Forecast' : "UGT Sales Forecast (${branchName})"
+          def projectKey = branchName == 'master' ? 'ugt-sales-forecast' : "ugt-sales-forecast-${safeBranch}"
+          def projectName = branchName == 'master' ? 'UGT Sales Forecast' : "UGT Sales Forecast (${branchName})"
           def scannerHome = tool('SonarQube-Scanner')
           withSonarQubeEnv('SonarQube') {
             withEnv([
