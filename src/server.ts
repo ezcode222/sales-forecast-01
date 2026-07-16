@@ -34,6 +34,19 @@ const distPath = path.resolve(process.cwd(), 'dist');
 // so auth callback/redirect URLs use the real public host, not localhost.
 app.set('trust proxy', true);
 
+// Collapse accidental `//` from reverse proxies / mis-joined base paths
+// (Express does not match `/ugt-sales-forecast//api/...` to `/ugt-sales-forecast/api/...`).
+app.use((req, _res, next) => {
+  if (req.url.includes('//')) {
+    const qIndex = req.url.indexOf('?');
+    const pathname = qIndex >= 0 ? req.url.slice(0, qIndex) : req.url;
+    const query = qIndex >= 0 ? req.url.slice(qIndex) : '';
+    const normalized = pathname.replace(/\/{2,}/g, '/');
+    if (normalized !== pathname) req.url = `${normalized}${query}`;
+  }
+  next();
+});
+
 app.use(express.json({ limit: '5mb' }));
 app.use(appModeContext);
 

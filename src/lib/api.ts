@@ -521,15 +521,22 @@ export interface AppRoleAssignment {
 
 const appBasePath = (
   (import.meta as ImportMeta & { env?: { BASE_URL?: string } }).env?.BASE_URL || '/'
-).replace(/\/$/, '');
+).replace(/\/+$/, '');
 
+/** Join app base + path without creating `//` (Express 404s on double-slash mounts). */
 function withAppBase(path: string) {
-  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-  if (!appBasePath) return normalizedPath;
-  if (normalizedPath === appBasePath || normalizedPath.startsWith(`${appBasePath}/`)) {
-    return normalizedPath;
+  const [pathnamePart, query = ''] = path.split('?');
+  const normalizedPath = (pathnamePart.startsWith('/') ? pathnamePart : `/${pathnamePart}`)
+    .replace(/\/{2,}/g, '/');
+  const suffix = query ? `?${query}` : '';
+  if (!appBasePath) return `${normalizedPath}${suffix}`;
+  if (
+    normalizedPath === appBasePath ||
+    normalizedPath.startsWith(`${appBasePath}/`)
+  ) {
+    return `${normalizedPath}${suffix}`;
   }
-  return `${appBasePath}${normalizedPath}`;
+  return `${appBasePath}${normalizedPath}${suffix}`.replace(/\/{2,}/g, '/');
 }
 
 function withModeQuery(path: string) {

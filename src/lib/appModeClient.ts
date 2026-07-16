@@ -50,9 +50,14 @@ export function ensureCanonicalModeInUrl(): AppMode {
   const mode = resolveClientAppMode(window.location.search);
   const publicMode = toPublicAppMode(mode);
   const url = new URL(window.location.href);
-  if (url.searchParams.get('mode') !== publicMode) {
-    url.searchParams.set('mode', publicMode);
-    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  url.searchParams.set('mode', publicMode);
+  const canonicalPathname = url.pathname.length > 1
+    ? url.pathname.replace(/\/+$/, '')
+    : url.pathname;
+  const canonicalUrl = `${canonicalPathname}${url.search}${url.hash}`;
+  const currentUrl = `${url.pathname}${window.location.search}${url.hash}`;
+  if (currentUrl !== canonicalUrl) {
+    window.history.replaceState(window.history.state, '', canonicalUrl);
   }
   storeAppMode(mode);
   return mode;
