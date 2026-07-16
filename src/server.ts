@@ -81,15 +81,6 @@ if (process.env.NODE_ENV !== 'production') {
   app.use('/api', requireAuth, apiRouter);
 }
 
-if (basePath) {
-  app.use((req, res, next) => {
-    // Prefer URL without trailing slash: /ugt-sales-forecast/ -> /ugt-sales-forecast
-    if (req.path !== `${basePath}/`) return next();
-    const queryIndex = req.originalUrl.indexOf('?');
-    const query = queryIndex >= 0 ? req.originalUrl.slice(queryIndex) : '';
-    return res.redirect(308, `${basePath}${query}`);
-  });
-}
 app.use(basePath || '/', express.static(distPath));
 app.get('/', (req, res) => res.redirect(getAppPath(req)));
 app.get([basePath, `${basePath}/*`], (_req, res) => {
